@@ -6,6 +6,7 @@ import time
 import os
 import shutil
 from crypto_engine import encrypt_drive, decrypt_drive
+from utils import load_settings, play_completion_sound, get_files_word
 
 class EncryptionWindow:
     def __init__(self, parent, drive_path, mode="encrypt"):
@@ -13,6 +14,7 @@ class EncryptionWindow:
         self.drive_path = drive_path
         self.mode = mode
         self.is_running = False
+        self.settings = load_settings()
 
         # Создаём модальное окно
         self.win = tk.Toplevel(parent.root)
@@ -117,6 +119,7 @@ class EncryptionWindow:
 
         if len(password) < 8:
             messagebox.showwarning("Предупреждение", "Пароль должен быть не менее 8 символов.")
+            return False
             # Можно продолжить, но предупредили
 
         return True
@@ -165,6 +168,19 @@ class EncryptionWindow:
         thread.daemon = True
         thread.start()
 
+    def load_settings(self):
+        """Загружает настройки из config.json"""
+        try:
+            from utils import load_settings
+            return load_settings()
+        except:
+            return {
+                "notify_sound": True,
+                "notify_popup": True,
+                "notify_log": False,
+                "log_path": "./encryption_log.txt"
+            }
+
     def finish_operation(self, message=None):
         self.is_running = False
         self.progress["value"] = 100
@@ -172,13 +188,19 @@ class EncryptionWindow:
         self.status_label.config(text=text)
         self.start_button.config(state="disabled")
         self.cancel_button.config(text="Закрыть", command=self.close_window)
-        # === Пункт 10: Обновить статус в главном окне ===
+        
+        # === Обновить статус в главном окне ===
         try:
             self.parent.scan_usb_drives()
         except Exception as e:
             print(f"Не удалось обновить список устройств: {e}")
-
-        messagebox.showinfo("Готово", message or f"{'Шифрование' if self.mode == 'encrypt' else 'Расшифровка'} успешно завершено!")
+        
+        # === Проверяем настройки и показываем уведомление ===
+        settings = self.load_settings()
+        
+        # Если включено уведомление — показываем окно и воспроизводим звук
+        if settings.get("notify_popup", True):
+            messagebox.showinfo("Готово", message or f"{'Шифрование' if self.mode == 'encrypt' else 'Расшифровка'} успешно завершено!")
 
     def cancelled_operation(self):
         """Операция прервана пользователем"""
@@ -203,27 +225,29 @@ class EncryptionWindow:
         password = self.password_entry.get()
         algorithm = self.algorithm_var.get()
         drive = self.drive_path
-
+        
         def progress(current, total):
             # Обновляем прогресс по количеству файлов
             self.parent.root.after(0, lambda: self.update_progress_simple(current, total))
-
+        
         try:
             total_files = encrypt_drive(drive, password, progress_callback=progress)
-            self.parent.root.after(0, lambda: self.finish_operation(f"Зашифровано {total_files} файлов."))
+            files_word = get_files_word(total_files)
+            self.parent.root.after(0, lambda: self.finish_operation(f"Зашифровано {total_files} {files_word}."))
         except Exception as e:
             self.parent.root.after(0, lambda: self.handle_error(str(e)))
 
     def real_decrypt(self):
         password = self.password_entry.get()
         drive = self.drive_path
-
+        
         def progress(current, total):
             self.parent.root.after(0, lambda: self.update_progress_simple(current, total))
-
+        
         try:
             total_files = decrypt_drive(drive, password, progress_callback=progress)
-            self.parent.root.after(0, lambda: self.finish_operation(f"Расшифровано {total_files} файлов."))
+            files_word = get_files_word(total_files)
+            self.parent.root.after(0, lambda: self.finish_operation(f"Расшифровано {total_files} {files_word}."))
         except Exception as e:
             self.parent.root.after(0, lambda: self.handle_error(str(e)))
 

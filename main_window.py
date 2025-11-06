@@ -16,21 +16,36 @@ class MainWindow:
         self.root.geometry("1000x600")
         center_window(self.root, 1000, 600)
         self.root.configure(bg="#f0f0f0")
+        self.last_known_drives = []
 
         # Верхнее меню
         self.top_button_frame = tk.Frame(root, bg="#e0e0e0", height=40)
         self.top_button_frame.pack(side="top", fill="x", padx=5, pady=5)
         self.top_button_frame.pack_propagate(False)
 
-        btn_encrypt = ttk.Button(self.top_button_frame, text="Шифровать", command=self.encrypt_selected, width=12)
+        btn_encrypt = tk.Button(self.top_button_frame, text="Шифровать", command=self.encrypt_selected, width=12,
+                       bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
+                       activebackground="#d0d0d0", activeforeground="black")
         btn_encrypt.pack(side="left", padx=5, pady=5)
-        btn_decrypt = ttk.Button(self.top_button_frame, text="Расшифровать", command=self.decrypt_selected, width=14)
+
+        btn_decrypt = tk.Button(self.top_button_frame, text="Расшифровать", command=self.decrypt_selected, width=14,
+                               bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
+                               activebackground="#d0d0d0", activeforeground="black")
         btn_decrypt.pack(side="left", padx=5, pady=5)
-        btn_settings = ttk.Button(self.top_button_frame, text="Настройки", command=self.open_settings, width=12)
+
+        btn_settings = tk.Button(self.top_button_frame, text="Настройки", command=self.open_settings, width=12,
+                                bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
+                                activebackground="#d0d0d0", activeforeground="black")
         btn_settings.pack(side="left", padx=5, pady=5)
-        btn_help = ttk.Button(self.top_button_frame, text="Помощь", command=self.open_help, width=12)
+
+        btn_help = tk.Button(self.top_button_frame, text="Помощь", command=self.open_help, width=12,
+                            bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
+                            activebackground="#d0d0d0", activeforeground="black")
         btn_help.pack(side="left", padx=5, pady=5)
-        btn_about = ttk.Button(self.top_button_frame, text="О программе", command=self.show_about, width=13)
+
+        btn_about = tk.Button(self.top_button_frame, text="О программе", command=self.show_about, width=13,
+                             bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
+                             activebackground="#d0d0d0", activeforeground="black")
         btn_about.pack(side="left", padx=5, pady=5)
 
         # --- Левая боковая панель (USB-устройства) ---
@@ -63,6 +78,21 @@ class MainWindow:
         # Загрузка устройств при запуске
         self.scan_usb_drives()
         self.apply_theme()
+
+        # Запускаем мониторинг USB-устройств
+        self.start_usb_monitoring()
+
+    def start_usb_monitoring(self):
+        """Запускает мониторинг подключенных устройств"""
+        self.root.after(3000, self.check_for_new_devices)
+
+    def check_for_new_devices(self):
+        """Проверяет, появились ли новые USB-устройства"""
+        current_drives = self.get_usb_drives()
+        if set(current_drives) != set(self.last_known_drives):
+            self.scan_usb_drives()
+            self.last_known_drives = current_drives
+        self.root.after(3000, self.check_for_new_devices)
 
     def scan_usb_drives(self):
         """Сканирует и заполняет список USB-устройств"""
@@ -286,23 +316,31 @@ class MainWindow:
         """Завершение операции"""
         self.progress.stop()
         self.status_label.config(text=msg)
-        messagebox.showinfo("Готово", msg)
-        self.scan_usb_drives()  # Обновляем список
+        self.scan_usb_drives()
 
     def open_settings(self):
         """Открывает окно настроек"""
-        from settings_window import SettingsWindow
-        SettingsWindow(self)
+        try:
+            from settings_window import SettingsWindow
+            SettingsWindow(self)
+        except ImportError as e:
+            messagebox.showerror("Ошибка", f"Не удалось открыть окно настроек: {e}")
 
     def show_about(self):
         """Открывает окно 'О программе'"""
-        from about_window import AboutWindow
-        AboutWindow(self)
+        try:
+            from about_window import AboutWindow
+            AboutWindow(self)
+        except ImportError as e:
+            messagebox.showerror("Ошибка", f"Не удалось открыть окно 'О программе': {e}")
 
     def open_help(self):
         """Открывает окно помощи"""
-        from help_window import HelpWindow
-        HelpWindow(self)
+        try:
+            from help_window import HelpWindow
+            HelpWindow(self)
+        except ImportError as e:
+            messagebox.showerror("Ошибка", f"Не удалось открыть окно помощи: {e}")
 
     def apply_theme(self):
         """Применяет выбранную тему из настроек"""
@@ -313,7 +351,11 @@ class MainWindow:
         except:
             theme = "light"
 
+        style = ttk.Style()
+
         if theme == "dark":
+            style.configure("TButton", background="#4a4a4a", foreground="white")
+            style.map("TButton", background=[("active", "#5a5a5a")])
             bg_main = "#2e2e2e"
             bg_panel = "#3c3c3c"
             fg_text = "white"
@@ -321,6 +363,8 @@ class MainWindow:
             listbox_fg = "white"
             status_bg = "#252525"
         else:  # light
+            style.configure("TButton", background="#e0e0e0", foreground="black")
+            style.map("TButton", background=[("active", "#d0d0d0")])
             bg_main = "#f0f0f0"
             bg_panel = "#e0e0e0"
             fg_text = "black"
@@ -356,8 +400,3 @@ try:
     import shutil
 except ImportError:
     shutil = None
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = MainWindow(root)
-    root.mainloop()
