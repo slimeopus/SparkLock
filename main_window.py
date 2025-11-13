@@ -12,7 +12,7 @@ class MainWindow:
     def __init__(self, root):
         self.active_encryption_window = None
         self.root = root
-        self.root.title("Шифровальщик USB-накопителей")
+        self.root.title("SparkLock")
         self.root.geometry("1000x600")
         center_window(self.root, 1000, 600)
         self.root.configure(bg="#f0f0f0")
@@ -62,7 +62,7 @@ class MainWindow:
         # --- Центральная область (информация) ---
         self.center_frame = tk.Frame(root, bg="white", padx=10, pady=10)
         self.center_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        tk.Label(self.center_frame, text="Детальная информация", font=("Arial", 14, "bold"), bg="white").pack(anchor="w", pady=(0, 10))
+        tk.Label(self.center_frame, text="Детальная информация", font=("Arial", 14, "bold"), bg="#e0e0e0").pack(anchor="w", pady=(0, 10))
         self.info_text = tk.Text(self.center_frame, wrap="word", state="disabled", bg="white", relief="flat", height=20)
         self.info_text.pack(fill="both", expand=True)
 
