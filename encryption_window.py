@@ -34,14 +34,27 @@ class EncryptionWindow:
         # --- Устройство ---
         tk.Label(self.win, text=f"Выбрано устройство: {drive_path}", font=("Arial", 10), fg="blue").pack(pady=5)
 
-        # --- Пароль ---
-        tk.Label(self.win, text="Пароль:", font=("Arial", 12)).pack(pady=(10, 0))
-        self.password_entry = ttk.Entry(self.win, show="*", width=40)
-        self.password_entry.pack(pady=5)
+        # --- Пароль с кнопкой показа/скрытия ---
+        password_frame = tk.Frame(self.win)
+        password_frame.pack(pady=(10, 5), fill="x", padx=40)
+        tk.Label(password_frame, text="Пароль:", font=("Arial", 12)).pack(anchor="w")
+        self.password_visible = False
+        self.password_entry = ttk.Entry(password_frame, show="*", width=40)
+        self.password_entry.pack(side="left", fill="x", expand=True)
+        self.toggle_password_btn = ttk.Button(password_frame, text=" 👁 ", width=4, command=self.toggle_password_visibility)
+        self.toggle_password_btn.pack(side="right", padx=(5, 0))
 
-        tk.Label(self.win, text="Подтвердите пароль:", font=("Arial", 12)).pack(pady=(5, 0))
-        self.confirm_entry = ttk.Entry(self.win, show="*", width=40)
-        self.confirm_entry.pack(pady=5)
+        confirm_frame = tk.Frame(self.win)
+        confirm_frame.pack(pady=(5, 10), fill="x", padx=40)
+        tk.Label(confirm_frame, text="Подтвердите пароль:", font=("Arial", 12)).pack(anchor="w")
+        self.confirm_visible = False
+        self.confirm_entry = ttk.Entry(confirm_frame, show="*", width=40)
+        self.confirm_entry.pack(side="left", fill="x", expand=True)
+        self.toggle_confirm_btn = ttk.Button(confirm_frame, text=" 👁 ", width=4, command=self.toggle_confirm_visibility)
+        self.toggle_confirm_btn.pack(side="right", padx=(5, 0))
+
+        self.password_entry.bind('<Return>', lambda event: self.confirm_entry.focus_set())
+        self.confirm_entry.bind('<Return>', lambda event: self.start_operation())
 
         # --- Кнопка генерации пароля ---
         gen_frame = tk.Frame(self.win)
@@ -102,7 +115,55 @@ class EncryptionWindow:
         self.password_entry.insert(0, password)
         self.confirm_entry.delete(0, tk.END)
         self.confirm_entry.insert(0, password)
+        # Скрываем пароль после генерации
+        self.password_visible = False
+        self.confirm_visible = False
+        self.password_entry.config(show="*")
+        self.confirm_entry.config(show="*")
+        self.toggle_password_btn.config(text=" 👁 ")
+        self.toggle_confirm_btn.config(text=" 👁 ")
         self.status_label.config(text="✅ Пароль сгенерирован", fg="green")
+        # Устанавливаем фокус на кнопку начала операции
+        self.start_button.focus_set()
+
+    def toggle_password_visibility(self):
+        """Переключает видимость основного пароля"""
+        self.password_visible = not self.password_visible
+        if self.password_visible:
+            self.password_entry.config(show="")
+            self.toggle_password_btn.config(text=" 🙈 ")
+        else:
+            self.password_entry.config(show="*")
+            self.toggle_password_btn.config(text=" 👁 ")
+        # Автоматически скрываем пароль через 5 секунд для безопасности
+        if self.password_visible:
+            self.win.after(5000, lambda: self.hide_password_after_delay("password"))
+
+    def toggle_confirm_visibility(self):
+        """Переключает видимость пароля подтверждения"""
+        self.confirm_visible = not self.confirm_visible
+        if self.confirm_visible:
+            self.confirm_entry.config(show="")
+            self.toggle_confirm_btn.config(text=" 🙈 ")
+        else:
+            self.confirm_entry.config(show="*")
+            self.toggle_confirm_btn.config(text=" 👁 ")
+        # Автоматически скрываем пароль через 5 секунд для безопасности
+        if self.confirm_visible:
+            self.win.after(5000, lambda: self.hide_password_after_delay("confirm"))
+
+    def hide_password_after_delay(self, field_type):
+        """Автоматически скрывает пароль после задержки для безопасности"""
+        if field_type == "password" and self.password_visible:
+            self.password_visible = False
+            self.password_entry.config(show="*")
+            self.toggle_password_btn.config(text=" 👁 ")
+            self.status_label.config(text="Пароль снова скрыт для безопасности", fg="gray")
+        elif field_type == "confirm" and self.confirm_visible:
+            self.confirm_visible = False
+            self.confirm_entry.config(show="*")
+            self.toggle_confirm_btn.config(text=" 👁 ")
+            self.status_label.config(text="Пароль снова скрыт для безопасности", fg="gray")
 
     def validate_inputs(self):
         """Проверяет корректность введённых данных"""
