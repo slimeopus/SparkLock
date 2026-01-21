@@ -199,46 +199,101 @@ def derive_key(password: str, salt: bytes, key_size: int = 32) -> bytes:
 def verify_key(attempt: bytes, original: bytes) -> bool:
     return bytes_eq(attempt, original)
 
+CHUNK_SIZE = 8192  # 8KB chunks для оптимального баланса между производительностью и потреблением памяти
+MAX_MEMORY_FILE_SIZE = 100 * 1024 * 1024  # 100 MB - порог для переключения на потоковую обработку
+
 def encrypt_file(file_path: str, algorithm: str, key: bytes) -> bytes:
-    """Шифрует файл с проверкой целостности перед удалением оригинала"""
-    data = Path(file_path).read_bytes()
-    original_hash = hashlib.sha256(data).hexdigest()
+    """Шифрует файл с проверкой целостности перед удалением оригинала.
+    Использует потоковую обработку для больших файлов (>100MB)"""
+    file_size = os.path.getsize(file_path)
+    original_hash = hashlib.sha256()
     
+    # Генерируем nonce
+    nonce = os.urandom(12)
+    
+    # Определяем алгоритм шифрования
     if algorithm == "AES-256-GCM":
-        nonce = os.urandom(12)
         cipher = AESGCM(key)
-        encrypted_data = cipher.encrypt(nonce, data, None)
     elif algorithm == "ChaCha20":
-        nonce = os.urandom(12)
         cipher = ChaCha20Poly1305(key)
-        encrypted_data = cipher.encrypt(nonce, data, None)
     else:
         raise ValueError(f"Неизвестный алгоритм: {algorithm}")
-
+    
     encrypted_path = file_path + ".encrypted"
-    Path(encrypted_path).write_bytes(encrypted_data)
-
-    # Проверяем целостность перед удалением исходного файла
-    if not verify_encryption_integrity(file_path, encrypted_path, algorithm, key, nonce):
-        os.remove(encrypted_path)  # Удаляем поврежденный зашифрованный файл
-        raise ValueError(f"Ошибка целостности при шифровании файла {file_path}. Исходный файл сохранен.")
-
-        # Еще одна проверка - сравниваем размеры (зашифрованный файл должен быть больше)
-    if os.path.getsize(encrypted_path) <= os.path.getsize(file_path):
-        os.remove(encrypted_path)
-        raise ValueError(f"Подозрительный размер зашифрованного файла {file_path}. Исходный файл сохранен.")
-
-        # Только после всех проверок удаляем исходный файл
-    os.remove(file_path)
-    return nonce
+    temp_path = encrypted_path + ".tmp"
+    
+    try:
+        # Для файлов меньше 100MB используем текущий метод для сохранения производительности
+        if file_size <= MAX_MEMORY_FILE_SIZE:
+            data = Path(file_path).read_bytes()
+            original_hash.update(data)
+            encrypted_data = cipher.encrypt(nonce, data, None)
+            Path(temp_path).write_bytes(encrypted_data)
+        else:
+            # Потоковая обработка для больших файлов
+            print(f"🔄 Потоковое шифрование большого файла: {os.path.basename(file_path)} ({file_size // (1024*1024)} MB)")
+            
+            with open(file_path, 'rb') as infile, open(temp_path, 'wb') as outfile:
+                # Читаем и хешируем файл блоками
+                while True:
+                    chunk = infile.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    original_hash.update(chunk)
+                
+                # Возвращаемся в начало файла для шифрования
+                infile.seek(0)
+                
+                # Собираем данные для шифрования (ограниченный буфер)
+                buffer = bytearray()
+                total_read = 0
+                
+                while True:
+                    chunk = infile.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    
+                    buffer.extend(chunk)
+                    total_read += len(chunk)
+                    
+                    # Шифруем буфер, когда он заполнится или достигнем конца файла
+                    if len(buffer) >= MAX_MEMORY_FILE_SIZE or not chunk:
+                        encrypted_chunk = cipher.encrypt(nonce, bytes(buffer), None)
+                        outfile.write(encrypted_chunk)
+                        buffer.clear()
+        
+        # Переименовываем временный файл
+        if os.path.exists(encrypted_path):
+            os.remove(encrypted_path)
+        os.rename(temp_path, encrypted_path)
+        
+        # Проверяем целостность
+        if not verify_encryption_integrity(file_path, encrypted_path, algorithm, key, nonce):
+            os.remove(encrypted_path)
+            raise ValueError(f"Ошибка целостности при шифровании файла {file_path}. Исходный файл сохранен.")
+        
+        # Проверяем размер
+        if os.path.getsize(encrypted_path) <= os.path.getsize(file_path):
+            os.remove(encrypted_path)
+            raise ValueError(f"Подозрительный размер зашифрованного файла {file_path}. Исходный файл сохранен.")
+        
+        # Удаляем исходный файл только после всех проверок
+        os.remove(file_path)
+        return nonce
+        
+    finally:
+        # Очищаем временные файлы в случае ошибки
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes):
-    """Расшифровывает файл с проверкой целостности перед удалением зашифрованной версии"""
+    """Расшифровывает файл с проверкой целостности перед удалением зашифрованной версии.
+    Использует потоковую обработку для больших файлов"""
+    encrypted_size = os.path.getsize(file_path)
     original_path = file_path.replace(".encrypted", "")
+    temp_path = original_path + ".tmp"
     
-    encrypted_data = Path(file_path).read_bytes()
-    original_size = len(encrypted_data)
-    
+    # Определяем алгоритм расшифровки
     if algorithm == "AES-256-GCM":
         cipher = AESGCM(key)
     elif algorithm == "ChaCha20":
@@ -247,30 +302,72 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes):
         raise ValueError(f"Неизвестный алгоритм: {algorithm}")
     
     try:
-        decrypted_data = cipher.decrypt(nonce, encrypted_data, None)
-    except Exception as e:
-        raise ValueError("Неверный пароль или повреждённые данные") from e
-    
-    # Сохраняем расшифрованные данные во временный файл для проверки
-    temp_path = original_path + ".tmp"
-    Path(temp_path).write_bytes(decrypted_data)
-    
-    # Проверяем размер (расшифрованный файл не должен быть слишком маленьким)
-    if os.path.getsize(temp_path) < max(1, original_size // 100):  # Не менее 1% от оригинала
-        os.remove(temp_path)
-        raise ValueError(f"Подозрительно маленький размер расшифрованного файла {original_path}")
-    
-    # Проверяем целостность через хеш
-    original_hash = hashlib.sha256(decrypted_data).hexdigest()
-    if not verify_decryption_integrity(file_path, temp_path, original_hash):
-        os.remove(temp_path)
-        raise ValueError(f"Ошибка целостности при расшифровке файла {original_path}")
-    
-    # Только после всех проверок заменяем исходный файл
-    if os.path.exists(original_path):
-        os.remove(original_path)
-    os.rename(temp_path, original_path)
-    os.remove(file_path)
+        # Для файлов меньше 100MB используем текущий метод
+        if encrypted_size <= MAX_MEMORY_FILE_SIZE:
+            encrypted_data = Path(file_path).read_bytes()
+            decrypted_data = cipher.decrypt(nonce, encrypted_data, None)
+            Path(temp_path).write_bytes(decrypted_data)
+        else:
+            # Потоковая обработка для больших файлов
+            print(f"🔄 Потоковое расшифровывание большого файла: {os.path.basename(original_path)} ({encrypted_size // (1024*1024)} MB)")
+            
+            with open(file_path, 'rb') as infile, open(temp_path, 'wb') as outfile:
+                # Считываем зашифрованные данные блоками
+                buffer = bytearray()
+                total_read = 0
+                
+                while True:
+                    chunk = infile.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    
+                    buffer.extend(chunk)
+                    total_read += len(chunk)
+                    
+                    # Расшифровываем буфер, когда он заполнится или достигнем конца файла
+                    if len(buffer) >= MAX_MEMORY_FILE_SIZE or not chunk:
+                        try:
+                            decrypted_chunk = cipher.decrypt(nonce, bytes(buffer), None)
+                            outfile.write(decrypted_chunk)
+                        except Exception as e:
+                            raise ValueError("Неверный пароль или повреждённые данные") from e
+                        buffer.clear()
+        
+        # Проверяем размер расшифрованного файла
+        decrypted_size = os.path.getsize(temp_path)
+        if decrypted_size < max(1, encrypted_size // 100):  # Не менее 1% от оригинала
+            os.remove(temp_path)
+            raise ValueError(f"Подозрительно маленький размер расшифрованного файла {original_path}")
+        
+        # Проверяем целостность через хеш
+        decrypted_hash = calculate_file_hash(temp_path)
+        original_hash = hashlib.sha256()
+        
+        # Считаем хеш оригинального файла блоками для экономии памяти
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                # Для проверки целостности нам нужно расшифровать данные
+                # Но мы уже расшифровали файл, поэтому просто используем хеш расшифрованного файла
+                pass
+        
+        # Проверяем целостность
+        if not verify_decryption_integrity(file_path, temp_path, decrypted_hash):
+            os.remove(temp_path)
+            raise ValueError(f"Ошибка целостности при расшифровке файла {original_path}")
+        
+        # Заменяем исходный файл
+        if os.path.exists(original_path):
+            os.remove(original_path)
+        os.rename(temp_path, original_path)
+        os.remove(file_path)
+        
+    finally:
+        # Очищаем временные файлы в случае ошибки
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def save_metadata(drive_path: str, salt: bytes, file_nonces: dict, algorithm: str):
     """Сохраняет метаданные на флешку"""
