@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import time
 import hashlib
 from typing import Optional, Dict, List, Tuple
+import hmac
 
 def calculate_file_hash(file_path: str) -> str:
     """Вычисляет SHA-256 хеш файла для проверки целостности"""
@@ -197,7 +198,7 @@ def derive_key(password: str, salt: bytes, key_size: int = 32) -> bytes:
     ).derive(password.encode())
 
 def verify_key(attempt: bytes, original: bytes) -> bool:
-    return bytes_eq(attempt, original)
+    return hmac.compare_digest(attempt, original)
 
 CHUNK_SIZE = 8192  # 8KB chunks для оптимального баланса между производительностью и потреблением памяти
 MAX_MEMORY_FILE_SIZE = 100 * 1024 * 1024  # 100 MB - порог для переключения на потоковую обработку
