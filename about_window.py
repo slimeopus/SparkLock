@@ -22,7 +22,7 @@ class AboutWindow:
         info_frame.pack(pady=10, padx=20, fill="x")
 
         tk.Label(info_frame, text="Версия:", font=("Arial", 10, "bold"), anchor="w").grid(row=0, column=0, sticky="w", pady=2)
-        tk.Label(info_frame, text="2.0.0", font=("Arial", 10), anchor="w").grid(row=0, column=1, sticky="w", padx=10, pady=2)
+        tk.Label(info_frame, text="3.4.0", font=("Arial", 10), anchor="w").grid(row=0, column=1, sticky="w", padx=10, pady=2)
 
         tk.Label(info_frame, text="Разработчик:", font=("Arial", 10, "bold"), anchor="w").grid(row=1, column=0, sticky="w", pady=2)
         tk.Label(info_frame, text="SlimeOpus", font=("Arial", 10), anchor="w").grid(row=1, column=1, sticky="w", padx=10, pady=2)
