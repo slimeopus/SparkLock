@@ -1,1 +1,158 @@
-
+{
+  "app_title": "SparkLock",
+  "program_title": "USB Drive Encryptor",
+  
+  "menu": {
+    "encrypt": "Encrypt",
+    "decrypt": "Decrypt",
+    "settings": "Settings",
+    "help": "Help",
+    "about": "About"
+  },
+  
+  "main_window": {
+    "usb_drives_title": "Connected USB Drives",
+    "detailed_info": "Detailed Information",
+    "ready_status": "Ready to work...",
+    "encrypted_status": "Encrypted",
+    "not_encrypted_status": "Not Encrypted",
+    "select_device_error": "Select a USB drive.",
+    "encryption_window_open": "Encryption window is already open.",
+    "gb": "GB",
+    "gb_free": "GB free",
+    "unknown": "Unknown",
+    "device_info": {
+      "name": "Device Name:",
+      "size": "Size:",
+      "free_space": "Free Space:",
+      "filesystem": "File System:",
+      "encryption_algorithm": "Encryption Algorithm:",
+      "status": "Status:",
+      "encrypted_yes": "✅ Encrypted",
+      "encrypted_no": "❌ Not Encrypted"
+    }
+  },
+  
+  "encryption_window": {
+    "title_encrypt": "Drive Encryption",
+    "title_decrypt": "Drive Decryption",
+    "selected_device": "Selected device:",
+    "password": "Password:",
+    "confirm_password": "Confirm Password:",
+    "generate_password": "Generate Strong Password",
+    "encryption_algorithm": "Encryption Algorithm:",
+    "start": "Start",
+    "cancel": "Cancel",
+    "progress": "Progress:",
+    "time_remaining": "Time Remaining:",
+    "ready_to_start": "Ready to start...",
+    "password_generated": "✅ Password Generated",
+    "password_hidden": "Password hidden for security",
+    "enter_password_error": "Enter password and confirm it.",
+    "password_mismatch_error": "Passwords do not match.",
+    "password_length_warning": "Password must be at least 8 characters.",
+    "insufficient_space_warning": "Insufficient free space on device for secure encryption.",
+    "operation_in_progress": "Operation is already in progress.",
+    "starting_operation": "Starting operation...",
+    "operation_cancelled": "❌ Operation Cancelled.",
+    "operation_completed": "✅ Operation Completed Successfully!",
+    "encryption_completed": "Encryption completed successfully!",
+    "decryption_completed": "Decryption completed successfully!",
+    "confirmation": "Are you sure you want to cancel the operation?",
+    "error": "❌ Error:",
+    "files_processed": "Processed {current} of {total} files...",
+    "encrypted_count": "Encrypted {count} {files_word}.",
+    "decrypted_count": "Decrypted {count} {files_word}."
+  },
+  
+  "settings_window": {
+    "title": "Settings",
+    "window_title": "Program Settings",
+    "interface_theme": "Interface Theme:",
+    "light_theme": "Light",
+    "dark_theme": "Dark",
+    "default_algorithm": "Default Encryption Algorithm:",
+    "notification_settings": "Operation Completion Notifications:",
+    "show_popup": "Show Popup Window",
+    "log_to_file": "Log to File",
+    "log_path": "Log File Path:",
+    "browse": "Browse",
+    "language": "Interface Language:",
+    "english": "English",
+    "russian": "Russian"
+  },
+  
+  "about_window": {
+    "title": "About",
+    "version": "Version:",
+    "developer": "Developer:"
+  },
+  
+  "help_window": {
+    "title": "Help",
+    "instructions_tab": "📌 Instructions",
+    "faq_tab": "❓ FAQ",
+    "support_tab": "📧 Support",
+    "close": "Close",
+    
+    "instructions": {
+      "header": "How to Use the Program",
+      "step1": "1. Connect a USB drive to your computer.",
+      "step2": "2. In the main window, select the device from the list on the left.",
+      "step3": "3. Click 'Encrypt' or 'Decrypt' in the top menu.",
+      "step4": "4. In the opened window:",
+      "step4_details": "   - Enter password and confirm it.",
+      "step4_details2": "   - Select encryption algorithm (AES-256 by default).",
+      "step4_details3": "   - Click 'Start'.",
+      "step5": "5. Wait for the operation to complete — progress and remaining time will be displayed.",
+      "step6": "6. After completion, you can safely eject the flash drive.",
+      "important": "⚠️ Important:",
+      "important1": "- Do not interrupt the encryption process — this may damage data.",
+      "important2": "- Password is not recoverable! Save it in a secure place.",
+      "important3": "- It is recommended to make a backup of important data before encryption."
+    },
+    
+    "faq": {
+      "header": "Frequently Asked Questions",
+      "q1": "Q: What to do if I forgot the password?",
+      "a1": "A: Unfortunately, without the password, data cannot be decrypted. The program does not store passwords.",
+      "q2": "Q: Can I encrypt the system drive?",
+      "a2": "A: No. The program works only with removable media (USB).",
+      "q3": "Q: How to check if a drive is encrypted?",
+      "a3": "A: In the main window, next to the device, the status is displayed: 'Encrypted' or 'Not Encrypted'.",
+      "q4": "Q: Where are the program settings stored?",
+      "a4": "A: In the config.json file in the program folder."
+    },
+    
+    "support": {
+      "header": "Contact Information",
+      "contact_info": "If you have problems or suggestions:",
+      "email": "📧 Email: slimeopusdev@tutamail.com",
+      "website": "🌐 Official Website: slimeopus.github.io"
+    }
+  },
+  
+  "algorithms": {
+    "aes256_desc": "High security, de facto standard",
+    "chacha20_desc": "Fast, good for mobile devices",
+    "xchacha20_desc": "Extended version of ChaCha with longer nonce, provides additional security"
+  },
+  
+  "errors": {
+    "settings_load_error": "Could not open settings window: {error}",
+    "about_load_error": "Could not open 'About' window: {error}",
+    "help_load_error": "Could not open help window: {error}",
+    "operation_error": "Error: {message}",
+    "error_title": "Error"
+  },
+  
+  "info": {
+    "info_title": "Information"
+  },
+  
+  "warnings": {
+    "insufficient_space": "Insufficient Space",
+    "warning": "Warning",
+    "cannot_check_space": "Could not check space: {error}"
+  }
+}
