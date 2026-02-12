@@ -1,4 +1,4 @@
-from utils import center_window
+from utils import center_window, get_lang_manager
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
@@ -15,29 +15,47 @@ class EncryptionWindow:
         self.mode = mode
         self.is_running = False
         self.settings = load_settings()
+        self.lang_manager = get_lang_manager()
 
         # Создаём модальное окно
         self.win = tk.Toplevel(parent.root)
         style = ttk.Style()
         style.theme_use('default')  # гарантирует, что стиль можно переопределить
         style.configure("Green.Horizontal.TProgressbar", foreground='green', background='green')
-        self.win.title(f"{'Шифрование' if mode == 'encrypt' else 'Расшифровка'} накопителя")
+        self.win.title(self.lang_manager.t(f"encryption_window.title_{mode}"))
         center_window(self.win, 500, 500)
         self.win.resizable(False, False)
         self.win.transient(parent.root)  # делаем модальным
         self.win.grab_set()  # блокируем родительское окно
 
+        # Сохраняем ссылки на элементы управления для последующего обновления
+        self.title_label = None
+        self.device_label = None
+        self.password_label = None
+        self.confirm_label = None
+        self.generate_password_btn = None
+        self.algorithm_label = None
+        self.algorithm_frame = None
+        self.start_button = None
+        self.cancel_button = None
+        self.progress_label = None
+        self.time_label = None
+        self.status_label = None
+
         # --- Заголовок ---
-        title = f"{'Шифрование' if mode == 'encrypt' else 'Расшифровка'} накопителя"
-        tk.Label(self.win, text=title, font=("Arial", 16, "bold")).pack(pady=(10, 5))
+        title = self.lang_manager.t(f"encryption_window.title_{mode}")
+        self.title_label = tk.Label(self.win, text=title, font=("Arial", 16, "bold"))
+        self.title_label.pack(pady=(10, 5))
 
         # --- Устройство ---
-        tk.Label(self.win, text=f"Выбрано устройство: {drive_path}", font=("Arial", 10), fg="blue").pack(pady=5)
+        self.device_label = tk.Label(self.win, text=f"{self.lang_manager.t('encryption_window.selected_device')} {drive_path}", font=("Arial", 10), fg="blue")
+        self.device_label.pack(pady=5)
 
         # --- Пароль с кнопкой показа/скрытия ---
         password_frame = tk.Frame(self.win)
         password_frame.pack(pady=(10, 5), fill="x", padx=40)
-        tk.Label(password_frame, text="Пароль:", font=("Arial", 12)).pack(anchor="w")
+        self.password_label = tk.Label(password_frame, text=self.lang_manager.t("encryption_window.password"), font=("Arial", 12))
+        self.password_label.pack(anchor="w")
         self.password_visible = False
         self.password_entry = ttk.Entry(password_frame, show="*", width=40)
         self.password_entry.pack(side="left", fill="x", expand=True)
@@ -46,7 +64,8 @@ class EncryptionWindow:
 
         confirm_frame = tk.Frame(self.win)
         confirm_frame.pack(pady=(5, 10), fill="x", padx=40)
-        tk.Label(confirm_frame, text="Подтвердите пароль:", font=("Arial", 12)).pack(anchor="w")
+        self.confirm_label = tk.Label(confirm_frame, text=self.lang_manager.t("encryption_window.confirm_password"), font=("Arial", 12))
+        self.confirm_label.pack(anchor="w")
         self.confirm_visible = False
         self.confirm_entry = ttk.Entry(confirm_frame, show="*", width=40)
         self.confirm_entry.pack(side="left", fill="x", expand=True)
@@ -59,38 +78,34 @@ class EncryptionWindow:
         # --- Кнопка генерации пароля ---
         gen_frame = tk.Frame(self.win)
         gen_frame.pack(pady=5)
-        ttk.Button(gen_frame, text="Сгенерировать надёжный пароль", command=self.generate_password).pack()
+        self.generate_password_btn = ttk.Button(gen_frame, text=self.lang_manager.t("encryption_window.generate_password"), command=self.generate_password)
+        self.generate_password_btn.pack()
 
         # --- Алгоритм ---
-        tk.Label(self.win, text="Алгоритм шифрования:", font=("Arial", 12)).pack(pady=(10, 0))
+        self.algorithm_label = tk.Label(self.win, text=self.lang_manager.t("encryption_window.encryption_algorithm"), font=("Arial", 12))
+        self.algorithm_label.pack(pady=(10, 0))
         self.algorithm_var = tk.StringVar(value="AES-256")
-        algorithm_frame = tk.Frame(self.win)
-        algorithm_frame.pack(pady=5)
+        self.algorithm_frame = tk.Frame(self.win)
+        self.algorithm_frame.pack(pady=5)
 
-        algorithms = [
-            ("AES-256", "Высокая безопасность, стандарт де-факто"),
-            ("ChaCha20", "Быстрый, хорош для мобильных устройств")
-        ]
-
-        for algo, desc in algorithms:
-            rb = ttk.Radiobutton(algorithm_frame, text=f"{algo} — {desc}", variable=self.algorithm_var, value=algo)
-            rb.pack(anchor="w", pady=2)
+        self.update_algorithms_display()
 
         # --- Кнопки ---
         button_frame = tk.Frame(self.win)
         button_frame.pack(pady=20)
 
-        self.start_button = ttk.Button(button_frame, text="Начать", command=self.start_operation, width=15)
+        self.start_button = ttk.Button(button_frame, text=self.lang_manager.t("encryption_window.start"), command=self.start_operation, width=15)
         self.start_button.pack(side="left", padx=10)
 
-        self.cancel_button = ttk.Button(button_frame, text="Отмена", command=self.cancel_operation, width=15)
+        self.cancel_button = ttk.Button(button_frame, text=self.lang_manager.t("encryption_window.cancel"), command=self.cancel_operation, width=15)
         self.cancel_button.pack(side="right", padx=10)
 
         # --- Прогресс и таймер ---
         progress_frame = tk.Frame(self.win)
         progress_frame.pack(fill="x", padx=20, pady=(10, 0))
 
-        tk.Label(progress_frame, text="Прогресс:").pack(anchor="w")
+        self.progress_label = tk.Label(progress_frame, text=self.lang_manager.t("encryption_window.progress"))
+        self.progress_label.pack(anchor="w")
         self.progress = ttk.Progressbar(
             progress_frame,
             mode="determinate",
@@ -99,12 +114,65 @@ class EncryptionWindow:
         )
         self.progress.pack(fill="x", pady=5)
 
-        self.time_label = tk.Label(progress_frame, text="Осталось: --:--", font=("Arial", 10))
+        self.time_label = tk.Label(progress_frame, text=self.lang_manager.t("encryption_window.time_remaining") + " --:--", font=("Arial", 10))
         self.time_label.pack(anchor="e", pady=5)
 
         # --- Статус ---
-        self.status_label = tk.Label(self.win, text="Готов к началу...", fg="gray")
+        self.status_label = tk.Label(self.win, text=self.lang_manager.t("encryption_window.ready_to_start"), fg="gray")
         self.status_label.pack(pady=10)
+
+        # Подписываемся на изменения языка
+        self.lang_manager.add_observer(self.update_ui_language)
+        
+        # Привязываем удаление наблюдателя к событию закрытия окна
+        self.win.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def on_close(self):
+        """Удаляем наблюдатель при закрытии окна"""
+        try:
+            self.lang_manager.remove_observer(self.update_ui_language)
+        except ValueError:
+            # Наблюдатель уже удален
+            pass
+        self.win.destroy()
+
+    def update_algorithms_display(self):
+        """Обновляет отображение алгоритмов с учетом текущего языка"""
+        # Удаляем старые радиокнопки
+        for widget in self.algorithm_frame.winfo_children():
+            widget.destroy()
+            
+        algorithms = [
+            ("AES-256", self.lang_manager.t("algorithms.aes256_desc")),
+            ("ChaCha20", self.lang_manager.t("algorithms.chacha20_desc")),
+            ("XChaCha20-Poly1305", self.lang_manager.t("algorithms.xchacha20_desc"))
+        ]
+
+        for algo, desc in algorithms:
+            rb = ttk.Radiobutton(self.algorithm_frame, text=f"{algo} — {desc}", variable=self.algorithm_var, value=algo)
+            rb.pack(anchor="w", pady=2)
+
+    def update_ui_language(self, language_code):
+        """Обновляет текст всех элементов интерфейса при смене языка"""
+        # Обновляем заголовок окна
+        self.win.title(self.lang_manager.t(f"encryption_window.title_{self.mode}"))
+        
+        # Обновляем текст меток
+        self.title_label.config(text=self.lang_manager.t(f"encryption_window.title_{self.mode}"))
+        self.device_label.config(text=f"{self.lang_manager.t('encryption_window.selected_device')} {self.drive_path}")
+        self.password_label.config(text=self.lang_manager.t("encryption_window.password"))
+        self.confirm_label.config(text=self.lang_manager.t("encryption_window.confirm_password"))
+        self.generate_password_btn.config(text=self.lang_manager.t("encryption_window.generate_password"))
+        self.algorithm_label.config(text=self.lang_manager.t("encryption_window.encryption_algorithm"))
+        
+        # Обновляем алгоритмы
+        self.update_algorithms_display()
+        
+        self.start_button.config(text=self.lang_manager.t("encryption_window.start"))
+        self.cancel_button.config(text=self.lang_manager.t("encryption_window.cancel"))
+        self.progress_label.config(text=self.lang_manager.t("encryption_window.progress"))
+        self.time_label.config(text=self.lang_manager.t("encryption_window.time_remaining") + " --:--")
+        self.status_label.config(text=self.lang_manager.t("encryption_window.ready_to_start"))
 
     def generate_password(self):
         import secrets
@@ -122,7 +190,7 @@ class EncryptionWindow:
         self.confirm_entry.config(show="*")
         self.toggle_password_btn.config(text=" 👁 ")
         self.toggle_confirm_btn.config(text=" 👁 ")
-        self.status_label.config(text="✅ Пароль сгенерирован", fg="green")
+        self.status_label.config(text=self.lang_manager.t("encryption_window.password_generated"), fg="green")
         # Устанавливаем фокус на кнопку начала операции
         self.start_button.focus_set()
 
@@ -158,12 +226,12 @@ class EncryptionWindow:
             self.password_visible = False
             self.password_entry.config(show="*")
             self.toggle_password_btn.config(text=" 👁 ")
-            self.status_label.config(text="Пароль снова скрыт для безопасности", fg="gray")
+            self.status_label.config(text=self.lang_manager.t("encryption_window.password_hidden"), fg="gray")
         elif field_type == "confirm" and self.confirm_visible:
             self.confirm_visible = False
             self.confirm_entry.config(show="*")
             self.toggle_confirm_btn.config(text=" 👁 ")
-            self.status_label.config(text="Пароль снова скрыт для безопасности", fg="gray")
+            self.status_label.config(text=self.lang_manager.t("encryption_window.password_hidden"), fg="gray")
 
     def validate_inputs(self):
         """Проверяет корректность введённых данных"""
@@ -171,15 +239,15 @@ class EncryptionWindow:
         confirm = self.confirm_entry.get()
 
         if not password or not confirm:
-            messagebox.showerror("Ошибка", "Введите пароль и подтвердите его.")
+            messagebox.showerror("Ошибка", self.lang_manager.t("encryption_window.enter_password_error"))
             return False
 
         if password != confirm:
-            messagebox.showerror("Ошибка", "Пароли не совпадают.")
+            messagebox.showerror("Ошибка", self.lang_manager.t("encryption_window.password_mismatch_error"))
             return False
 
         if len(password) < 8:
-            messagebox.showwarning("Предупреждение", "Пароль должен быть не менее 8 символов.")
+            messagebox.showwarning("Предупреждение", self.lang_manager.t("encryption_window.password_length_warning"))
             return False
             # Можно продолжить, но предупредили
 
@@ -191,7 +259,7 @@ class EncryptionWindow:
             return
 
         if self.is_running:
-            messagebox.showinfo("Информация", "Операция уже выполняется.")
+            messagebox.showinfo("Информация", self.lang_manager.t("encryption_window.operation_in_progress"))
             return
 
         # === Пункт 3: Проверка свободного места (только при шифровании) ===
@@ -202,24 +270,24 @@ class EncryptionWindow:
                 needed = int(used * 1.2)
                 if free < needed:
                     messagebox.showwarning(
-                        "Недостаточно места",
-                        f"На устройстве недостаточно свободного места для безопасного шифрования.\n"
-                        f"Занято: {used // (1024**2)} МБ\n"
-                        f"Свободно: {free // (1024**2)} МБ\n"
+                        self.lang_manager.t("warnings.insufficient_space"),
+                        self.lang_manager.t("encryption_window.insufficient_space_warning") + "\n" +
+                        f"Занято: {used // (1024**2)} МБ\n" +
+                        f"Свободно: {free // (1024**2)} МБ\n" +
                         f"Рекомендуется: минимум {needed // (1024**2)} МБ свободного места."
                     )
                     return
             except Exception as e:
-                messagebox.showwarning("Предупреждение", f"Не удалось проверить место: {e}")
+                messagebox.showwarning(self.lang_manager.t("warnings.warning"), self.lang_manager.t("warnings.cannot_check_space", error=str(e)))
 
         self.is_running = True
         self.start_button.config(state="disabled")
-        self.cancel_button.config(text="Прервать")
+        self.cancel_button.config(text=self.lang_manager.t("encryption_window.cancel"))
 
         # Сбрасываем прогресс
         self.progress["value"] = 0
-        self.time_label.config(text="Осталось: --:--")
-        self.status_label.config(text="Начинаем операцию...")
+        self.time_label.config(text=self.lang_manager.t("encryption_window.time_remaining") + " --:--")
+        self.status_label.config(text=self.lang_manager.t("encryption_window.starting_operation"))
 
         # Имитация длительной операции в отдельном потоке
         if self.mode == "encrypt":
@@ -245,35 +313,36 @@ class EncryptionWindow:
     def finish_operation(self, message=None):
         self.is_running = False
         self.progress["value"] = 100
-        text = message if message else "✅ Операция завершена успешно!"
+        text = message if message else self.lang_manager.t("encryption_window.operation_completed")
         self.status_label.config(text=text)
         self.start_button.config(state="disabled")
-        self.cancel_button.config(text="Закрыть", command=self.close_window)
-        
+        self.cancel_button.config(text=self.lang_manager.t("encryption_window.cancel"), command=self.close_window)
+
         # === Обновить статус в главном окне ===
         try:
             self.parent.scan_usb_drives()
         except Exception as e:
             print(f"Не удалось обновить список устройств: {e}")
-        
+
         # === Проверяем настройки и показываем уведомление ===
         settings = self.load_settings()
-        
+
         # Если включено уведомление — показываем окно и воспроизводим звук
         if settings.get("notify_popup", True):
-            messagebox.showinfo("Готово", message or f"{'Шифрование' if self.mode == 'encrypt' else 'Расшифровка'} успешно завершено!")
+            popup_message = message or self.lang_manager.t(f"encryption_window.{self.mode}_completed")
+            messagebox.showinfo(self.lang_manager.t("encryption_window.operation_completed"), popup_message)
 
     def cancelled_operation(self):
         """Операция прервана пользователем"""
         self.is_running = False
-        self.status_label.config(text="❌ Операция прервана.")
+        self.status_label.config(text=self.lang_manager.t("encryption_window.operation_cancelled"))
         self.start_button.config(state="normal")
-        self.cancel_button.config(text="Закрыть", command=self.close_window)
+        self.cancel_button.config(text=self.lang_manager.t("encryption_window.cancel"), command=self.close_window)
 
     def cancel_operation(self):
         """Пользователь нажал «Отмена»"""
         if self.is_running:
-            if messagebox.askyesno("Подтверждение", "Вы уверены, что хотите прервать операцию?"):
+            if messagebox.askyesno("Подтверждение", self.lang_manager.t("encryption_window.confirmation")):
                 self.is_running = False
         else:
             self.close_window()
@@ -286,29 +355,31 @@ class EncryptionWindow:
         password = self.password_entry.get()
         algorithm = self.algorithm_var.get()
         drive = self.drive_path
-        
+
         def progress(current, total):
             # Обновляем прогресс по количеству файлов
             self.parent.root.after(0, lambda: self.update_progress_simple(current, total))
-        
+
         try:
             total_files = encrypt_drive(drive, password, progress_callback=progress)
-            files_word = get_files_word(total_files)
-            self.parent.root.after(0, lambda: self.finish_operation(f"Зашифровано {total_files} {files_word}."))
+            files_word = get_files_word(total_files, self.lang_manager.current_language)
+            message = self.lang_manager.t("encryption_window.encrypted_count", count=total_files, files_word=files_word)
+            self.parent.root.after(0, lambda: self.finish_operation(message))
         except Exception as e:
             self.parent.root.after(0, lambda: self.handle_error(str(e)))
 
     def real_decrypt(self):
         password = self.password_entry.get()
         drive = self.drive_path
-        
+
         def progress(current, total):
             self.parent.root.after(0, lambda: self.update_progress_simple(current, total))
-        
+
         try:
             total_files = decrypt_drive(drive, password, progress_callback=progress)
-            files_word = get_files_word(total_files)
-            self.parent.root.after(0, lambda: self.finish_operation(f"Расшифровано {total_files} {files_word}."))
+            files_word = get_files_word(total_files, self.lang_manager.current_language)
+            message = self.lang_manager.t("encryption_window.decrypted_count", count=total_files, files_word=files_word)
+            self.parent.root.after(0, lambda: self.finish_operation(message))
         except Exception as e:
             self.parent.root.after(0, lambda: self.handle_error(str(e)))
 
@@ -319,12 +390,12 @@ class EncryptionWindow:
         else:
             percent = int((current / total) * 100)
             self.progress["value"] = percent
-        self.status_label.config(text=f"Обработано {current} из {total} файлов...")
+        self.status_label.config(text=self.lang_manager.t("encryption_window.files_processed", current=current, total=total))
 
     def handle_error(self, message):
         """Обработка ошибок шифрования/расшифровки"""
         self.is_running = False
-        self.status_label.config(text=f"❌ Ошибка: {message}", fg="red")
+        self.status_label.config(text=self.lang_manager.t("encryption_window.error") + f" {message}", fg="red")
         self.start_button.config(state="normal")
-        self.cancel_button.config(text="Закрыть", command=self.close_window)
-        messagebox.showerror("Ошибка", message)
+        self.cancel_button.config(text=self.lang_manager.t("encryption_window.cancel"), command=self.close_window)
+        messagebox.showerror(self.lang_manager.t("errors.error_title"), self.lang_manager.t("errors.operation_error", message=message))

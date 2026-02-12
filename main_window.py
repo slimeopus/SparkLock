@@ -1,4 +1,4 @@
-from utils import center_window
+from utils import center_window, get_lang_manager
 import json
 import tkinter as tk
 from tkinter import ttk, messagebox, Menu
@@ -12,47 +12,62 @@ class MainWindow:
     def __init__(self, root):
         self.active_encryption_window = None
         self.root = root
-        self.root.title("SparkLock")
+        self.lang_manager = get_lang_manager()
+        # Подписываемся на изменения языка
+        self.lang_manager.add_observer(self.update_ui_language)
+        
+        self.root.title(self.lang_manager.t("app_title"))
         self.root.geometry("1000x600")
         center_window(self.root, 1000, 600)
         self.root.configure(bg="#f0f0f0")
         self.last_known_drives = []
+
+        # Сохраняем ссылки на элементы управления для последующего обновления
+        self.btn_encrypt = None
+        self.btn_decrypt = None
+        self.btn_settings = None
+        self.btn_help = None
+        self.btn_about = None
+        self.usb_drives_label = None
+        self.detailed_info_label = None
+        self.status_label = None
 
         # Верхнее меню
         self.top_button_frame = tk.Frame(root, bg="#e0e0e0", height=40)
         self.top_button_frame.pack(side="top", fill="x", padx=5, pady=5)
         self.top_button_frame.pack_propagate(False)
 
-        btn_encrypt = tk.Button(self.top_button_frame, text="Шифровать", command=self.encrypt_selected, width=12,
+        self.btn_encrypt = tk.Button(self.top_button_frame, text=self.lang_manager.t("menu.encrypt"), command=self.encrypt_selected, width=12,
                        bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
                        activebackground="#d0d0d0", activeforeground="black")
-        btn_encrypt.pack(side="left", padx=5, pady=5)
+        self.btn_encrypt.pack(side="left", padx=5, pady=5)
 
-        btn_decrypt = tk.Button(self.top_button_frame, text="Расшифровать", command=self.decrypt_selected, width=14,
+        self.btn_decrypt = tk.Button(self.top_button_frame, text=self.lang_manager.t("menu.decrypt"), command=self.decrypt_selected, width=14,
                                bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
                                activebackground="#d0d0d0", activeforeground="black")
-        btn_decrypt.pack(side="left", padx=5, pady=5)
+        self.btn_decrypt.pack(side="left", padx=5, pady=5)
 
-        btn_settings = tk.Button(self.top_button_frame, text="Настройки", command=self.open_settings, width=12,
+        self.btn_settings = tk.Button(self.top_button_frame, text=self.lang_manager.t("menu.settings"), command=self.open_settings, width=12,
                                 bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
                                 activebackground="#d0d0d0", activeforeground="black")
-        btn_settings.pack(side="left", padx=5, pady=5)
+        self.btn_settings.pack(side="left", padx=5, pady=5)
 
-        btn_help = tk.Button(self.top_button_frame, text="Помощь", command=self.open_help, width=12,
+        self.btn_help = tk.Button(self.top_button_frame, text=self.lang_manager.t("menu.help"), command=self.open_help, width=12,
                             bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
                             activebackground="#d0d0d0", activeforeground="black")
-        btn_help.pack(side="left", padx=5, pady=5)
+        self.btn_help.pack(side="left", padx=5, pady=5)
 
-        btn_about = tk.Button(self.top_button_frame, text="О программе", command=self.show_about, width=13,
+        self.btn_about = tk.Button(self.top_button_frame, text=self.lang_manager.t("menu.about"), command=self.show_about, width=13,
                              bg="#e0e0e0", fg="black", relief="flat", padx=5, pady=2,
                              activebackground="#d0d0d0", activeforeground="black")
-        btn_about.pack(side="left", padx=5, pady=5)
+        self.btn_about.pack(side="left", padx=5, pady=5)
 
         # --- Левая боковая панель (USB-устройства) ---
         self.left_frame = tk.Frame(root, bg="#e0e0e0", width=300)
         self.left_frame.pack(side="left", fill="y", padx=5, pady=5)
         self.left_frame.pack_propagate(False)
-        tk.Label(self.left_frame, text="Подключённые USB-накопители", font=("Arial", 12, "bold"), bg="#e0e0e0").pack(pady=(10, 5))
+        self.usb_drives_label = tk.Label(self.left_frame, text=self.lang_manager.t("main_window.usb_drives_title"), font=("Arial", 12, "bold"), bg="#e0e0e0")
+        self.usb_drives_label.pack(pady=(10, 5))
 
         # Список устройств
         self.usb_listbox = tk.Listbox(self.left_frame, selectmode="single", height=20, bg="white", relief="flat")
@@ -62,7 +77,8 @@ class MainWindow:
         # --- Центральная область (информация) ---
         self.center_frame = tk.Frame(root, bg="white", padx=10, pady=10)
         self.center_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        tk.Label(self.center_frame, text="Детальная информация", font=("Arial", 14, "bold"), bg="#e0e0e0").pack(anchor="w", pady=(0, 10))
+        self.detailed_info_label = tk.Label(self.center_frame, text=self.lang_manager.t("main_window.detailed_info"), font=("Arial", 14, "bold"), bg="#e0e0e0")
+        self.detailed_info_label.pack(anchor="w", pady=(0, 10))
         self.info_text = tk.Text(self.center_frame, wrap="word", state="disabled", bg="white", relief="flat", height=20)
         self.info_text.pack(fill="both", expand=True)
 
@@ -70,7 +86,7 @@ class MainWindow:
         self.bottom_frame = tk.Frame(root, bg="#d0d0d0", height=40)
         self.bottom_frame.pack(side="bottom", fill="x", padx=5, pady=5)
         self.bottom_frame.pack_propagate(False)
-        self.status_label = tk.Label(self.bottom_frame, text="Готов к работе...", anchor="w", bg="#d0d0d0")
+        self.status_label = tk.Label(self.bottom_frame, text=self.lang_manager.t("main_window.ready_status"), anchor="w", bg="#d0d0d0")
         self.status_label.pack(side="left", padx=10)
         self.progress = ttk.Progressbar(self.bottom_frame, mode="indeterminate")
         self.progress.pack(side="right", padx=10, fill="x", expand=True)
@@ -81,6 +97,43 @@ class MainWindow:
 
         # Запускаем мониторинг USB-устройств
         self.start_usb_monitoring()
+        
+        # Привязываем удаление наблюдателя к событию закрытия окна
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def on_close(self):
+        """Удаляем наблюдатель при закрытии окна"""
+        try:
+            self.lang_manager.remove_observer(self.update_ui_language)
+        except ValueError:
+            # Наблюдатель уже удален
+            pass
+        self.root.destroy()
+
+    def update_ui_language(self, language_code):
+        """Обновляет текст всех элементов интерфейса при смене языка"""
+        # Обновляем заголовок окна
+        self.root.title(self.lang_manager.t("app_title"))
+        
+        # Обновляем текст кнопок меню
+        self.btn_encrypt.config(text=self.lang_manager.t("menu.encrypt"))
+        self.btn_decrypt.config(text=self.lang_manager.t("menu.decrypt"))
+        self.btn_settings.config(text=self.lang_manager.t("menu.settings"))
+        self.btn_help.config(text=self.lang_manager.t("menu.help"))
+        self.btn_about.config(text=self.lang_manager.t("menu.about"))
+        
+        # Обновляем метки
+        self.usb_drives_label.config(text=self.lang_manager.t("main_window.usb_drives_title"))
+        self.detailed_info_label.config(text=self.lang_manager.t("main_window.detailed_info"))
+        self.status_label.config(text=self.lang_manager.t("main_window.ready_status"))
+        
+        # Пересканируем устройства, чтобы обновить их статусы
+        self.scan_usb_drives()
+        
+        # Если есть выбранный элемент, обновим информацию о нем
+        selection = self.usb_listbox.curselection()
+        if selection:
+            self.on_usb_select(None)
 
     def start_usb_monitoring(self):
         """Запускает мониторинг подключенных устройств"""
@@ -100,7 +153,7 @@ class MainWindow:
         self.usb_listbox.delete(0, tk.END)
         for drive in drives:
             info = self.get_drive_info(drive)
-            status = "Зашифровано" if info.get("encrypted", False) else "Не зашифровано"
+            status = self.lang_manager.t("main_window.encrypted_status") if info.get("encrypted", False) else self.lang_manager.t("main_window.not_encrypted_status")
             display = f"{info['name']} ({info['size']}) — {status}"
             self.usb_listbox.insert(tk.END, display)
             self.usb_listbox.itemconfig(tk.END, {'fg': 'red' if info.get("encrypted") else 'black'})
@@ -174,21 +227,21 @@ class MainWindow:
         fs_type = self.get_filesystem_type(path)
         meta_path = os.path.join(path, ".usb_crypt_meta.json")
         encrypted = os.path.exists(meta_path)
-        
+
         if encrypted:
             try:
                 with open(meta_path, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
                 algorithm = meta.get("algorithm", "AES-256-GCM")
             except:
-                algorithm = "Неизвестен"
+                algorithm = self.lang_manager.t("main_window.unknown")
         else:
             algorithm = "—"
 
         return {
             "name": name,
-            "size": f"{size_gb} ГБ",
-            "free": f"{free_gb} ГБ свободно",
+            "size": f"{size_gb} {self.lang_manager.t('main_window.gb')}",
+            "free": f"{free_gb} {self.lang_manager.t('main_window.gb_free')}",
             "fs": fs_type,
             "encrypted": encrypted,
             "algorithm": algorithm
@@ -258,12 +311,12 @@ class MainWindow:
         drive = self.get_usb_drives()[index]
         info = self.get_drive_info(drive)
 
-        text = f"Имя устройства: {info['name']}\n"
-        text += f"Объём: {info['size']}\n"
-        text += f"Свободное место: {info['free']}\n"
-        text += f"Файловая система: {info['fs']}\n"
-        text += f"Алгоритм шифрования: {info['algorithm']}\n"
-        text += f"Статус: {'✅ Зашифровано' if info['encrypted'] else '❌ Не зашифровано'}"
+        text = f"{self.lang_manager.t('main_window.device_info.name')} {info['name']}\n"
+        text += f"{self.lang_manager.t('main_window.device_info.size')} {info['size']}\n"
+        text += f"{self.lang_manager.t('main_window.device_info.free_space')} {info['free']}\n"
+        text += f"{self.lang_manager.t('main_window.device_info.filesystem')} {info['fs']}\n"
+        text += f"{self.lang_manager.t('main_window.device_info.encryption_algorithm')} {info['algorithm']}\n"
+        text += f"{self.lang_manager.t('main_window.device_info.status')} {self.lang_manager.t('main_window.device_info.encrypted_yes') if info['encrypted'] else self.lang_manager.t('main_window.device_info.encrypted_no')}"
 
         self.info_text.config(state="normal")
         self.info_text.delete(1.0, tk.END)
@@ -274,7 +327,7 @@ class MainWindow:
         """Открывает окно шифрования"""
         selection = self.usb_listbox.curselection()
         if not selection:
-            messagebox.showwarning("Ошибка", "Выберите USB-накопитель.")
+            messagebox.showwarning(self.lang_manager.t("errors.error_title"), self.lang_manager.t("main_window.select_device_error"))
             return
 
         drive = self.get_usb_drives()[selection[0]]
@@ -282,13 +335,13 @@ class MainWindow:
             from encryption_window import EncryptionWindow
             self.active_encryption_window = EncryptionWindow(self, drive, mode="encrypt").win
         else:
-            messagebox.showinfo("Информация", "Окно шифрования уже открыто.")
+            messagebox.showinfo(self.lang_manager.t("info.info_title"), self.lang_manager.t("main_window.encryption_window_open"))
 
     def decrypt_selected(self):
         """Открывает окно расшифровки"""
         selection = self.usb_listbox.curselection()
         if not selection:
-            messagebox.showwarning("Ошибка", "Выберите USB-накопитель.")
+            messagebox.showwarning(self.lang_manager.t("errors.error_title"), self.lang_manager.t("main_window.select_device_error"))
             return
 
         drive = self.get_usb_drives()[selection[0]]
@@ -296,7 +349,7 @@ class MainWindow:
             from encryption_window import EncryptionWindow
             self.active_encryption_window = EncryptionWindow(self, drive, mode="decrypt").win
         else:
-            messagebox.showinfo("Информация", "Окно шифрования уже открыто.")
+            messagebox.showinfo(self.lang_manager.t("info.info_title"), self.lang_manager.t("main_window.encryption_window_open"))
 
     def start_operation(self, message, success_msg):
         """Запускает операцию в отдельном потоке с анимацией прогресса"""
@@ -324,7 +377,7 @@ class MainWindow:
             from settings_window import SettingsWindow
             SettingsWindow(self)
         except ImportError as e:
-            messagebox.showerror("Ошибка", f"Не удалось открыть окно настроек: {e}")
+            messagebox.showerror("Ошибка", self.lang_manager.t("errors.settings_load_error", error=str(e)))
 
     def show_about(self):
         """Открывает окно 'О программе'"""
@@ -332,7 +385,7 @@ class MainWindow:
             from about_window import AboutWindow
             AboutWindow(self)
         except ImportError as e:
-            messagebox.showerror("Ошибка", f"Не удалось открыть окно 'О программе': {e}")
+            messagebox.showerror("Ошибка", self.lang_manager.t("errors.about_load_error", error=str(e)))
 
     def open_help(self):
         """Открывает окно помощи"""
@@ -340,7 +393,7 @@ class MainWindow:
             from help_window import HelpWindow
             HelpWindow(self)
         except ImportError as e:
-            messagebox.showerror("Ошибка", f"Не удалось открыть окно помощи: {e}")
+            messagebox.showerror("Ошибка", self.lang_manager.t("errors.help_load_error", error=str(e)))
 
     def apply_theme(self):
         """Применяет выбранную тему из настроек"""
@@ -348,6 +401,12 @@ class MainWindow:
             with open("config.json", "r", encoding="utf-8") as f:
                 config = json.load(f)
             theme = config.get("theme", "light")
+            # Update language if it's in config
+            if "language" in config:
+                current_lang = self.lang_manager.current_language
+                new_lang = config["language"]
+                if current_lang != new_lang:
+                    self.lang_manager.set_language(new_lang)
         except:
             theme = "light"
 

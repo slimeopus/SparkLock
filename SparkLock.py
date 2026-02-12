@@ -6,19 +6,17 @@ import sys
 import json
 from resources import resource_path
 
-default_language = 'ru'
-
-locales_path = resource_path("locales")
-print(f"DEBUG: Путь к локалям: {locales_path}")
-print(f"DEBUG: Содержимое папки: {os.listdir(locales_path) if os.path.exists(locales_path) else 'Папка не найдена'}")
-
 def main():
     # Уничтожаем любое существующее окно перед созданием нового
     if tk._default_root is not None:
         tk._default_root.destroy()
 
     root = tk.Tk()
-    root.title("SparkLock")
+    
+    # Устанавливаем заголовок окна с учетом локализации
+    from utils import get_lang_manager
+    lang_manager = get_lang_manager()
+    root.title(lang_manager.t("app_title"))
 
     # Центрируем окно ДО создания приложения
     from utils import center_window
