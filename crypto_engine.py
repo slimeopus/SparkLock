@@ -777,35 +777,35 @@ def rollback_operation(drive_path: str):
     lock_data = recover_from_lock(drive_path)
     if not lock_data:
         raise ValueError("Нет незавершенной операции для отката")
-    
+
     operation = lock_data["operation"]
     processed_files = lock_data.get("processed_files", [])
-    
+
     print(f"Начинаем откат операции {operation}...")
-    
+
     if operation == "encrypt":
         # Для отката шифрования: расшифровываем обработанные файлы
         salt, file_nonces, algorithm = load_metadata(drive_path)
-        
+
         with secure_key(input("Введите пароль для отката: "), salt, 32) as key:
             for file_info in processed_files:
                 if file_info.get("success", False):
                     rel_path = file_info["path"]
                     encrypted_path = os.path.join(drive_path, rel_path + ".encrypted")
                     nonce = file_nonces.get(rel_path)
-                    
+
                     if nonce and os.path.exists(encrypted_path):
                         try:
                             decrypt_file(encrypted_path, algorithm, key, nonce)
                             print(f"✅ Откат файла: {rel_path}")
                         except Exception as e:
                             print(f"❌ Ошибка отката файла {rel_path}: {e}")
-        
+
         # Удаляем метаданные после отката
         meta_path = os.path.join(drive_path, METADATA_FILE)
         if os.path.exists(meta_path):
             os.remove(meta_path)
-    
+
     elif operation == "decrypt":
         # Для отката расшифровки: переименовываем файлы обратно во временное состояние
         for file_info in processed_files:
@@ -813,14 +813,287 @@ def rollback_operation(drive_path: str):
                 rel_path = file_info["path"]
                 decrypted_path = os.path.join(drive_path, rel_path)
                 encrypted_path = decrypted_path + ".encrypted"
-                
+
                 if os.path.exists(decrypted_path) and not os.path.exists(encrypted_path):
                     try:
                         os.rename(decrypted_path, encrypted_path)
                         print(f"✅ Откат файла: {rel_path}")
                     except Exception as e:
                         print(f"❌ Ошибка отката файла {rel_path}: {e}")
-    
+
     # Удаляем файл блокировки после завершения отката
     remove_lock(drive_path)
     print("Операция отката завершена. Накопитель возвращен в исходное состояние.")
+
+
+# === Параллельная обработка файлов ===
+import concurrent.futures
+from threading import Lock
+
+# Блокировка для синхронизации обновления прогресса
+progress_lock = Lock()
+
+def encrypt_files_parallel(file_paths: List[str], algorithm: str, key: bytes, max_workers: int = 4) -> Dict[str, Tuple[bytes, str]]:
+    """
+    Параллельно шифрует несколько файлов
+    
+    Args:
+        file_paths: Список путей к файлам для шифрования
+        algorithm: Алгоритм шифрования
+        key: Ключ шифрования
+        max_workers: Максимальное количество потоков
+        
+    Returns:
+        Словарь с nonce и hmac для каждого файла
+    """
+    results = {}
+    
+    def encrypt_single_file(file_path: str):
+        try:
+            nonce, hmac_value = encrypt_file(file_path, algorithm, key)
+            return file_path, nonce, hmac_value
+        except Exception as e:
+            print(f"⚠️ Ошибка шифрования файла {file_path}: {e}")
+            return file_path, None, None
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Запускаем задачи шифрования
+        future_to_file = {executor.submit(encrypt_single_file, file_path): file_path 
+                          for file_path in file_paths}
+        
+        # Обрабатываем результаты
+        for future in concurrent.futures.as_completed(future_to_file):
+            file_path, nonce, hmac_value = future.result()
+            if nonce is not None and hmac_value is not None:
+                results[file_path] = (nonce, hmac_value)
+    
+    return results
+
+
+def decrypt_files_parallel(file_paths: List[Tuple[str, str, bytes, bytes, str]], max_workers: int = 4) -> List[bool]:
+    """
+    Параллельно расшифровывает несколько файлов
+    
+    Args:
+        file_paths: Список кортежей (encrypted_path, algorithm, key, nonce, original_hmac)
+        max_workers: Максимальное количество потоков
+        
+    Returns:
+        Список результатов (успешно ли расшифрован каждый файл)
+    """
+    results = []
+    
+    def decrypt_single_file(encrypted_path: str, algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None):
+        try:
+            decrypt_file(encrypted_path, algorithm, key, nonce, original_hmac)
+            return True
+        except Exception as e:
+            print(f"⚠️ Ошибка расшифровки файла {encrypted_path}: {e}")
+            return False
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Подготовим аргументы для каждой задачи
+        futures = []
+        for encrypted_path, algorithm, key, nonce, original_hmac in file_paths:
+            future = executor.submit(decrypt_single_file, encrypted_path, algorithm, key, nonce, original_hmac)
+            futures.append(future)
+        
+        # Обрабатываем результаты
+        for future in concurrent.futures.as_completed(futures):
+            success = future.result()
+            results.append(success)
+    
+    return results
+
+
+def encrypt_drive_parallel(drive_path: str, password: str, algorithm: str = "AES-256-GCM", 
+                          max_workers: int = 4, progress_callback=None):
+    """
+    Параллельное шифрование всего диска
+    
+    Args:
+        drive_path: Путь к диску для шифрования
+        password: Пароль для шифрования
+        algorithm: Алгоритм шифрования
+        max_workers: Максимальное количество потоков
+        progress_callback: Функция обратного вызова для отображения прогресса
+    """
+    # Проверяем, есть ли незавершенная операция
+    recovery_data = recover_from_lock(drive_path)
+    if recovery_data and recovery_data["status"] == "in_progress":
+        raise ValueError("Обнаружена незавершенная операция шифрования. Сначала завершите или отмените её.")
+
+    if is_encrypted(drive_path):
+        raise ValueError("Накопитель уже зашифрован!")
+
+    # Проверка сложности пароля
+    is_strong, message = validate_password_strength(password)
+    if not is_strong:
+        raise ValueError(f"Слабый пароль: {message}. "
+                         "Используйте пароль минимум из 12 символов с заглавными и строчными буквами, "
+                         "цифрами и специальными символами.")
+
+    # Собираем список файлов для шифрования
+    all_files = []
+    total_size = 0
+    for root, dirs, files in os.walk(drive_path):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('System Volume Information', '$RECYCLE.BIN')]
+        for f in files:
+            if f in (METADATA_FILE, LOCK_FILE, TEMP_METADATA_FILE) or f.startswith('.'):
+                continue
+            file_path = os.path.join(root, f)
+            all_files.append(file_path)
+            total_size += os.path.getsize(file_path)
+
+    # Проверяем наличие достаточного места на диске (учитывая увеличение размера при шифровании)
+    if not check_disk_space(drive_path, total_size * 1.3):
+        raise ValueError("Недостаточно места на диске для безопасного шифрования. Требуется примерно на 30% больше места, чем занимают файлы.")
+
+    # Создаем файл блокировки
+    lock_path = create_lock(drive_path, "encrypt", algorithm)
+
+    # Определяем длину ключа
+    key_size = 32  # все три алгоритма используют 256-битный ключ
+    salt = os.urandom(16)
+
+    total = len(all_files)
+    processed_count = 0
+
+    try:
+        with secure_key(password, salt, key_size) as key:
+            # Используем параллельное шифрование
+            file_results = encrypt_files_parallel(all_files, algorithm, key, max_workers)
+            
+            # Подготовим метаданные
+            file_nonces = {}
+            file_hmacs = {}
+            
+            for file_path, (nonce, hmac_value) in file_results.items():
+                if nonce is not None and hmac_value is not None:
+                    rel_path = os.path.relpath(file_path, drive_path)
+                    file_nonces[rel_path] = nonce
+                    file_hmacs[rel_path] = hmac_value
+                    processed_count += 1
+                    update_lock(lock_path, rel_path, success=True)
+                    
+                    # Обновляем прогресс
+                    if progress_callback:
+                        with progress_lock:
+                            progress_callback(processed_count, total)
+                else:
+                    rel_path = os.path.relpath(file_path, drive_path)
+                    update_lock(lock_path, rel_path, success=False)
+
+            # Сохраняем метаданные во временный файл
+            temp_meta_path = os.path.join(drive_path, TEMP_METADATA_FILE)
+            save_metadata(drive_path, salt, file_nonces, file_hmacs, algorithm)
+
+            # Только после успешного сохранения метаданных переименовываем в основной файл
+            meta_path = os.path.join(drive_path, METADATA_FILE)
+            if os.path.exists(meta_path):
+                os.remove(meta_path)
+            os.rename(temp_meta_path, meta_path)
+
+            # Обновляем статус блокировки
+            with open(lock_path, 'r', encoding='utf-8') as f:
+                lock_data = json.load(f)
+            lock_data["status"] = "completed"
+            lock_data["total_files"] = total
+            lock_data["processed_files_count"] = processed_count
+            with open(lock_path, 'w', encoding='utf-8') as f:
+                json.dump(lock_data, f, indent=2)
+
+            return processed_count
+    except Exception as e:
+        # При ошибке сохраняем блокировку для возможности восстановления
+        print(f"Критическая ошибка при шифровании: {e}")
+        raise
+    finally:
+        # Удаляем блокировку только при полном успехе
+        if os.path.exists(lock_path):
+            with open(lock_path, 'r', encoding='utf-8') as f:
+                lock_data = json.load(f)
+            if lock_data.get("status") == "completed":
+                remove_lock(drive_path)
+
+
+def decrypt_drive_parallel(drive_path: str, password: str, max_workers: int = 4, progress_callback=None):
+    """
+    Параллельная расшифровка всего диска
+    
+    Args:
+        drive_path: Путь к диску для расшифровки
+        password: Пароль для расшифровки
+        max_workers: Максимальное количество потоков
+        progress_callback: Функция обратного вызова для отображения прогресса
+    """
+    # Проверяем, есть ли незавершенная операция
+    recovery_data = recover_from_lock(drive_path)
+    if recovery_data and recovery_data["status"] == "in_progress":
+        raise ValueError("Обнаружена незавершенная операция расшифровки. Сначала завершите или отмените её.")
+
+    if not is_encrypted(drive_path):
+        raise ValueError("Накопитель не зашифрован!")
+
+    # Проверка сложности пароля (даже при расшифровке)
+    is_strong, _ = validate_password_strength(password)
+    if not is_strong:
+        print("Предупреждение: Используется слабый пароль. Рекомендуется изменить пароль после расшифровки.")
+
+    salt, file_nonces, file_hmacs, algorithm = load_metadata(drive_path)
+
+    # Создаем файл блокировки
+    lock_path = create_lock(drive_path, "decrypt")
+
+    total = len(file_nonces)
+    processed_count = 0
+
+    try:
+        with secure_key(password, salt, 32) as key:
+            # Подготовим список файлов для расшифровки
+            files_to_decrypt = []
+            for rel_path, nonce in file_nonces.items():
+                encrypted_path = os.path.join(drive_path, rel_path + ".encrypted")
+                original_hmac = file_hmacs.get(rel_path)
+                
+                if os.path.exists(encrypted_path):
+                    files_to_decrypt.append((encrypted_path, algorithm, key, nonce, original_hmac))
+            
+            # Используем параллельную расшифровку
+            results = decrypt_files_parallel(files_to_decrypt, max_workers)
+            
+            # Обновляем статусы
+            for i, (rel_path, nonce) in enumerate(file_nonces.items()):
+                if i < len(results) and results[i]:
+                    processed_count += 1
+                    update_lock(lock_path, rel_path, success=True)
+                else:
+                    update_lock(lock_path, rel_path, success=False)
+
+                # Обновляем прогресс
+                if progress_callback:
+                    with progress_lock:
+                        progress_callback(min(i + 1, total), total)
+
+            # Обновляем статус блокировки
+            with open(lock_path, 'r', encoding='utf-8') as f:
+                lock_data = json.load(f)
+            lock_data["status"] = "completed"
+            lock_data["total_files"] = total
+            lock_data["processed_files_count"] = processed_count
+            with open(lock_path, 'w', encoding='utf-8') as f:
+                json.dump(lock_data, f, indent=2)
+
+            # Только после успешной расшифровки всех файлов удаляем метаданные
+            os.remove(os.path.join(drive_path, METADATA_FILE))
+            return processed_count
+    except Exception as e:
+        print(f"Критическая ошибка при расшифровке: {e}")
+        raise
+    finally:
+        # Удаляем блокировку только при полном успехе
+        if os.path.exists(lock_path):
+            with open(lock_path, 'r', encoding='utf-8') as f:
+                lock_data = json.load(f)
+            if lock_data.get("status") == "completed":
+                remove_lock(drive_path)
