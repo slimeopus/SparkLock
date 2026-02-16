@@ -1,6 +1,9 @@
 import os
 import json
 import tempfile
+import gc
+import mmap
+import weakref
 from pathlib import Path
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -12,8 +15,9 @@ import ctypes
 from contextlib import contextmanager
 import time
 import hashlib
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Union
 import hmac
+import psutil
 
 try:
     import nacl.exceptions
@@ -21,6 +25,221 @@ try:
     HAS_PYNACL = True
 except ImportError:
     HAS_PYNACL = False
+
+
+# === Улучшенное управление памятью ===
+
+class SecureBytes:
+    """
+    Класс для безопасного хранения чувствительных данных (ключей, паролей) в памяти.
+    Автоматически очищает данные при удалении объекта.
+    """
+    
+    def __init__(self, data: Union[bytes, bytearray, int]):
+        """
+        Инициализирует безопасный буфер.
+        
+        Args:
+            data: Начальные данные (bytes, bytearray) или размер буфера (int)
+        """
+        if isinstance(data, int):
+            self._buffer = bytearray(data)
+        else:
+            self._buffer = bytearray(data)
+        self._finalized = False
+        # Регистрируем слабый финализатор для очистки при сборке мусора
+        self._weak_ref = weakref.ref(self, self._cleanup_callback)
+    
+    @staticmethod
+    def _cleanup_callback(weak_ref):
+        """Вызывается при удалении объекта сборщиком мусора"""
+        # Не можем здесь очистить, объект уже уничтожен
+        # Но можем принудительно запустить gc
+        gc.collect()
+    
+    @property
+    def data(self) -> bytes:
+        """Возвращает неизменяемую копию данных"""
+        if self._finalized:
+            raise ValueError("Данные уже были очищены")
+        return bytes(self._buffer)
+    
+    @property
+    def buffer(self) -> bytearray:
+        """Возвращает прямой доступ к буферу (только для внутреннего использования)"""
+        if self._finalized:
+            raise ValueError("Данные уже были очищены")
+        return self._buffer
+    
+    def wipe(self, passes: int = 3):
+        """
+        Безопасно перезаписывает данные несколькими проходами.
+        
+        Args:
+            passes: Количество проходов перезаписи (1 случайный, остальные нули)
+        """
+        if self._finalized or len(self._buffer) == 0:
+            return
+        
+        # Проход 1: случайные данные
+        self._buffer[:] = secrets.token_bytes(len(self._buffer))
+        
+        # Дополнительные проходы: нули и единицы
+        for i in range(passes - 1):
+            if i % 2 == 0:
+                self._buffer[:] = b'\x00' * len(self._buffer)
+            else:
+                self._buffer[:] = b'\xFF' * len(self._buffer)
+        
+        # Финальный проход: нули
+        self._buffer[:] = b'\x00' * len(self._buffer)
+        self._finalized = True
+        
+        # Принудительная сборка мусора
+        gc.collect()
+    
+    def __len__(self) -> int:
+        return len(self._buffer)
+    
+    def __del__(self):
+        """Автоматическая очистка при уничтожении объекта"""
+        if not self._finalized:
+            self.wipe()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.wipe()
+        return False
+
+
+class MemoryMonitor:
+    """
+    Мониторинг использования памяти для предотвращения переполнения.
+    """
+    
+    def __init__(self, max_memory_percent: float = 80.0):
+        """
+        Args:
+            max_memory_percent: Максимальный процент использования памяти перед предупреждением
+        """
+        self.max_memory_percent = max_memory_percent
+        self.process = psutil.Process()
+    
+    def get_memory_usage(self) -> Tuple[float, float]:
+        """
+        Возвращает текущее использование памяти.
+        
+        Returns:
+            Кортеж (процент_использования, мегабайты_используется)
+        """
+        mem_info = self.process.memory_info()
+        mem_percent = self.process.memory_percent()
+        mb_used = mem_info.rss / (1024 * 1024)
+        return mem_percent, mb_used
+    
+    def check_memory_available(self, required_bytes: int) -> bool:
+        """
+        Проверяет, достаточно ли доступно памяти.
+        
+        Args:
+            required_bytes: Требуемое количество байт
+            
+        Returns:
+            True если памяти достаточно, False иначе
+        """
+        mem_percent, _ = self.get_memory_usage()
+        if mem_percent > self.max_memory_percent:
+            print(f"⚠️ Предупреждение: использование памяти {mem_percent:.1f}% (порог: {self.max_memory_percent}%)")
+            # Принудительная сборка мусора
+            gc.collect()
+            return False
+        return True
+    
+    @contextmanager
+    def memory_limit(self, required_bytes: int):
+        """
+        Контекстный менеджер для операций с выделением памяти.
+        
+        Args:
+            required_bytes: Требуемое количество байт
+        """
+        if not self.check_memory_available(required_bytes):
+            raise MemoryError(f"Недостаточно доступной памяти для операции ({required_bytes} байт)")
+        try:
+            yield
+        finally:
+            # Освобождаем память после операции
+            gc.collect()
+
+
+def secure_wipe(data: bytearray, passes: int = 3):
+    """
+    Безопасно очищает содержимое bytearray множественными проходами перезаписи.
+    Соответствует рекомендациям NIST SP 800-88 для очистки памяти.
+    
+    Args:
+        data: bytearray для очистки
+        passes: Количество проходов перезаписи (по умолчанию 3)
+    """
+    if not isinstance(data, bytearray):
+        raise TypeError("Можно очистить только bytearray")
+    
+    if len(data) == 0:
+        return
+    
+    # Проход 1: случайные данные
+    random_data = secrets.token_bytes(len(data))
+    data[:] = random_data
+    
+    # Проход 2: нули
+    data[:] = b'\x00' * len(data)
+    
+    # Проход 3: единицы (если указано)
+    if passes > 2:
+        data[:] = b'\xFF' * len(data)
+    
+    # Финальный проход: нули
+    data[:] = b'\x00' * len(data)
+    
+    # Принудительно запускаем сборку мусора
+    gc.collect()
+
+
+def get_memory_stats() -> Dict[str, Union[float, int]]:
+    """
+    Возвращает статистику использования памяти процессом.
+    
+    Returns:
+        Словарь с ключами:
+        - percent: процент использования памяти
+        - rss_mb: резидентная память в МБ
+        - vms_mb: виртуальная память в МБ
+        - available_mb: доступно памяти в системе в МБ
+    """
+    process = psutil.Process()
+    mem_info = process.memory_info()
+    virtual_memory = psutil.virtual_memory()
+    
+    return {
+        "percent": process.memory_percent(),
+        "rss_mb": mem_info.rss / (1024 * 1024),
+        "vms_mb": mem_info.vms / (1024 * 1024),
+        "available_mb": virtual_memory.available / (1024 * 1024)
+    }
+
+
+def log_memory_usage(operation: str = ""):
+    """
+    Выводит в лог текущее использование памяти (для отладки).
+    
+    Args:
+        operation: Описание операции для логирования
+    """
+    stats = get_memory_stats()
+    print(f"[MEMORY] {operation}: {stats['rss_mb']:.1f} MB ({stats['percent']:.1f}%)")
+
 
 def calculate_file_hash(file_path: str) -> str:
     """Вычисляет SHA-256 хеш файла для проверки целостности"""
@@ -198,19 +417,41 @@ def secure_wipe(data: bytearray):
 
 @contextmanager
 def secure_key(password: str, salt: bytes, key_size: int = 32):
-    """Контекстный менеджер для безопасного управления ключом"""
-    key_buffer = bytearray(PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=key_size,
-        salt=salt,
-        iterations=1_000_000,  # Увеличиваем количество итераций
-    ).derive(password.encode()))
+    """Контекстный менеджер для безопасного управления ключом с использованием SecureBytes"""
+    key_buffer = SecureBytes(
+        PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=key_size,
+            salt=salt,
+            iterations=1_000_000,  # Увеличиваем количество итераций
+        ).derive(password.encode())
+    )
 
     try:
-        yield bytes(key_buffer)  # Возвращаем неизменяемую копию для использования
+        yield key_buffer.data  # Возвращаем неизменяемую копию для использования
     finally:
-        # Безопасно очищаем буфер ключа из памяти
-        secure_wipe(key_buffer)
+        # Безопасно очищаем буфер ключа из памяти (автоматически через SecureBytes.wipe())
+        key_buffer.wipe()
+
+@contextmanager
+def secure_key_buffer(password: str, salt: bytes, key_size: int = 32):
+    """
+    Контекстный менеджер для безопасного управления ключом с прямым доступом к буферу.
+    Используйте только когда нужен прямой доступ к bytearray для модификации.
+    """
+    key_buffer = SecureBytes(
+        PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=key_size,
+            salt=salt,
+            iterations=1_000_000,
+        ).derive(password.encode())
+    )
+
+    try:
+        yield key_buffer.buffer  # Возвращаем прямой доступ к буферу
+    finally:
+        key_buffer.wipe()
 
 def validate_password_strength(password: str) -> bool:
     """Проверяет сложность пароля, возвращает True если пароль достаточно сложный"""
@@ -258,8 +499,75 @@ def verify_key(attempt: bytes, original: bytes) -> bool:
 CHUNK_SIZE = 8192  # 8KB chunks для оптимального баланса между производительностью и потреблением памяти
 MAX_MEMORY_FILE_SIZE = 100 * 1024 * 1024  # 100 MB - порог для переключения на потоковую обработку
 
+# Глобальный монитор памяти для всех операций
+_memory_monitor = MemoryMonitor(max_memory_percent=80.0)
+
+
+class MemorySensitiveReader:
+    """
+    Контекстный менеджер для чтения файлов с контролем использования памяти.
+    Автоматически переключается на потоковое чтение для больших файлов.
+    """
+    
+    def __init__(self, file_path: str, memory_threshold: int = MAX_MEMORY_FILE_SIZE):
+        """
+        Args:
+            file_path: Путь к файлу для чтения
+            memory_threshold: Порог размера файла для переключения на потоковый режим
+        """
+        self.file_path = file_path
+        self.memory_threshold = memory_threshold
+        self.file_size = os.path.getsize(file_path)
+        self.use_streaming = self.file_size > memory_threshold
+        self._file = None
+        self._data = None
+    
+    def __enter__(self):
+        if not _memory_monitor.check_memory_available(self.file_size):
+            # Принудительно включаем потоковый режим если мало памяти
+            self.use_streaming = True
+        
+        if self.use_streaming:
+            self._file = open(self.file_path, 'rb')
+        else:
+            with _memory_monitor.memory_limit(self.file_size):
+                self._data = Path(self.file_path).read_bytes()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._file:
+            self._file.close()
+        self._data = None
+        gc.collect()
+    
+    def read_all(self) -> bytes:
+        """Читает весь файл в память (только если use_streaming=False)"""
+        if self.use_streaming:
+            raise RuntimeError("read_all() недоступен в потоковом режиме")
+        return self._data
+    
+    def iter_chunks(self, chunk_size: int = CHUNK_SIZE):
+        """Итератор для потокового чтения файла блоками"""
+        if not self.use_streaming and self._data:
+            # Если файл в памяти, всё равно используем итератор для совместимости
+            for i in range(0, len(self._data), chunk_size):
+                yield self._data[i:i + chunk_size]
+        elif self._file:
+            while True:
+                chunk = self._file.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+        else:
+            raise RuntimeError("Файл не открыт")
+    
+    @property
+    def size(self) -> int:
+        return self.file_size
+
+
 def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[bytes, str]:
-    """Шифрует файл с помощью XChaCha20-Poly1305"""
+    """Шифрует файл с помощью XChaCha20-Poly1305 с улучшенным управлением памятью"""
     if not HAS_PYNACL:
         raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
 
@@ -268,7 +576,7 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
         raise ValueError("XChaCha20-Poly1305 требует 32-байтовый ключ")
 
     key_for_pynacl = key
-    
+
     # Вычисляем HMAC оригинального файла
     original_hmac = calculate_hmac(file_path, key)
 
@@ -277,37 +585,32 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
     temp_path = encrypted_path + ".tmp"
 
     try:
-        if file_size <= MAX_MEMORY_FILE_SIZE:
-            # Для файлов до 100MB шифруем целиком
-            data = Path(file_path).read_bytes()
-            encrypted_data = crypto_aead_xchacha20poly1305_encrypt(
-                message=data,
-                ad=None,  # Additional data (не используется)
-                nonce=nonce,
-                key=key_for_pynacl
-            )
-            Path(temp_path).write_bytes(encrypted_data)
-        else:
-            # Для больших файлов используем потоковую обработку
-            print(f"[INFO] Потоковое шифрование большого файла: {os.path.basename(file_path)} ({file_size // (1024*1024)} MB)")
+        # Используем MemorySensitiveReader для автоматического управления памятью
+        with MemorySensitiveReader(file_path) as reader:
+            if not reader.use_streaming:
+                # Для файлов до порога шифруем целиком в памяти
+                data = reader.read_all()
+                encrypted_data = crypto_aead_xchacha20poly1305_encrypt(
+                    message=data,
+                    ad=None,
+                    nonce=nonce,
+                    key=key_for_pynacl
+                )
+                Path(temp_path).write_bytes(encrypted_data)
+            else:
+                # Для больших файлов используем потоковую обработку
+                print(f"[INFO] Потоковое шифрование большого файла: {os.path.basename(file_path)} ({file_size // (1024*1024)} MB)")
 
-            # PyNaCl не поддерживает потоковую обработку напрямую, но мы можем обрабатывать файл блоками
-            # чтобы избежать загрузки всего файла в память
-            with open(file_path, 'rb') as infile, open(temp_path, 'wb') as outfile:
-                while True:
-                    chunk = infile.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-
-                    # Зашифровываем каждый блок с тем же nonce (это не идеальный подход с точки зрения безопасности,
-                    # но позволяет избежать загрузки всего файла в память)
-                    encrypted_chunk = crypto_aead_xchacha20poly1305_encrypt(
-                        message=chunk,
-                        ad=None,
-                        nonce=nonce,
-                        key=key_for_pynacl
-                    )
-                    outfile.write(encrypted_chunk)
+                with open(temp_path, 'wb') as outfile:
+                    for chunk in reader.iter_chunks():
+                        # Зашифровываем каждый блок
+                        encrypted_chunk = crypto_aead_xchacha20poly1305_encrypt(
+                            message=chunk,
+                            ad=None,
+                            nonce=nonce,
+                            key=key_for_pynacl
+                        )
+                        outfile.write(encrypted_chunk)
 
         # Переименовываем временный файл
         if os.path.exists(encrypted_path):
@@ -330,10 +633,9 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
 
 def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str]:
     """Шифрует файл с проверкой целостности перед удалением оригинала.
-    Использует потоковую обработку для больших файлов (>100MB)"""
+    Использует MemorySensitiveReader для улучшенного управления памятью"""
     file_size = os.path.getsize(file_path)
-    original_hash = hashlib.sha256()
-    
+
     # Вычисляем HMAC оригинального файла
     original_hmac = calculate_hmac(file_path, key)
 
@@ -358,45 +660,38 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
     # Если это один из стандартных алгоритмов (AES или ChaCha20), продолжаем стандартную процедуру
     encrypted_path = file_path + ".encrypted"
     temp_path = encrypted_path + ".tmp"
+    original_hash = hashlib.sha256()
 
     try:
-        # Для файлов меньше 100MB используем текущий метод для сохранения производительности
-        if file_size <= MAX_MEMORY_FILE_SIZE:
-            data = Path(file_path).read_bytes()
-            original_hash.update(data)
-            encrypted_data = cipher.encrypt(nonce, data, None)
-            Path(temp_path).write_bytes(encrypted_data)
-        else:
-            # Потоковая обработка для больших файлов
-            print(f"[INFO] Потоковое шифрование большого файла: {os.path.basename(file_path)} ({file_size // (1024*1024)} MB)")
+        # Используем MemorySensitiveReader для автоматического управления памятью
+        with MemorySensitiveReader(file_path) as reader:
+            if not reader.use_streaming:
+                # Для файлов до порога шифруем целиком в памяти
+                data = reader.read_all()
+                original_hash.update(data)
+                encrypted_data = cipher.encrypt(nonce, data, None)
+                Path(temp_path).write_bytes(encrypted_data)
+            else:
+                # Потоковая обработка для больших файлов
+                print(f"[INFO] Потоковое шифрование большого файла: {os.path.basename(file_path)} ({file_size // (1024*1024)} MB)")
 
-            # Вычисляем хеш оригинального файла
-            with open(file_path, 'rb') as infile:
-                while True:
-                    chunk = infile.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
+                # Вычисляем хеш оригинального файла потоково
+                for chunk in reader.iter_chunks():
                     original_hash.update(chunk)
 
-            # Для AEAD-алгоритмов (AES-GCM, ChaCha20-Poly1305) мы должны шифровать файл целиком
-            # для обеспечения аутентификации и целостности.
-            # Попробуем использовать меньший порог для максимально допустимого размера файла в памяти
-            # и обработать исключение, если памяти недостаточно
-            try:
-                with open(file_path, 'rb') as infile:
-                    file_data = infile.read()
-
-                encrypted_data = cipher.encrypt(nonce, file_data, None)
-
-                # Записываем зашифрованные данные во временный файл
-                with open(temp_path, 'wb') as outfile:
-                    outfile.write(encrypted_data)
-            except MemoryError:
-                # Если недостаточно памяти для загрузки всего файла, используем альтернативный подход
-                # ВНИМАНИЕ: Это снижает безопасность, поскольку AEAD-алгоритмы не поддерживают
-                # частичное шифрование с последующей проверкой целостности всего файла
-                # Этот вариант следует использовать только в крайнем случае
-                raise ValueError(f"Файл слишком велик для шифрования с проверкой целостности. Рассмотрите использование XChaCha20-Poly1305.")
+                # Для AEAD-алгоритмов мы должны шифровать файл целиком для целостности
+                # Используем SecureBytes для временного хранения данных
+                with SecureBytes(reader.size) as data_buffer:
+                    # Читаем файл в безопасный буфер
+                    with open(file_path, 'rb') as f:
+                        f.seek(0)
+                        data_buffer.buffer[:] = f.read()
+                    
+                    try:
+                        encrypted_data = cipher.encrypt(nonce, data_buffer.data, None)
+                        Path(temp_path).write_bytes(encrypted_data)
+                    except MemoryError:
+                        raise ValueError(f"Файл слишком велик для шифрования с проверкой целостности. Рассмотрите использование XChaCha20-Poly1305.")
 
         # Переименовываем временный файл
         if os.path.exists(encrypted_path):
@@ -424,7 +719,7 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
             os.remove(temp_path)
 
 def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_hmac: str = None):
-    """Расшифровывает файл с помощью XChaCha20-Poly1305"""
+    """Расшифровывает файл с помощью XChaCha20-Poly1305 с улучшенным управлением памятью"""
     if not HAS_PYNACL:
         raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
 
@@ -439,42 +734,37 @@ def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_h
     temp_path = original_path + ".tmp"
 
     try:
-        if encrypted_size <= MAX_MEMORY_FILE_SIZE:
-            # Для файлов до 100MB расшифровываем целиком
-            encrypted_data = Path(file_path).read_bytes()
-            try:
-                decrypted_data = crypto_aead_xchacha20poly1305_decrypt(
-                    ciphertext=encrypted_data,
-                    ad=None,  # Additional data (не используется)
-                    nonce=nonce,
-                    key=key_for_pynacl
-                )
-                Path(temp_path).write_bytes(decrypted_data)
-            except nacl.exceptions.CryptoError:
-                raise ValueError("Неверный пароль или повреждённые данные")
-        else:
-            # Для больших файлов используем потоковую обработку
-            print(f"[INFO] Потоковое расшифровывание большого файла: {os.path.basename(original_path)} ({encrypted_size // (1024*1024)} MB)")
+        # Используем MemorySensitiveReader для автоматического управления памятью
+        with MemorySensitiveReader(file_path) as reader:
+            if not reader.use_streaming:
+                # Для файлов до порога расшифровываем целиком
+                encrypted_data = reader.read_all()
+                try:
+                    decrypted_data = crypto_aead_xchacha20poly1305_decrypt(
+                        ciphertext=encrypted_data,
+                        ad=None,
+                        nonce=nonce,
+                        key=key_for_pynacl
+                    )
+                    Path(temp_path).write_bytes(decrypted_data)
+                except nacl.exceptions.CryptoError:
+                    raise ValueError("Неверный пароль или повреждённые данные")
+            else:
+                # Для больших файлов используем потоковую обработку
+                print(f"[INFO] Потоковое расшифровывание большого файла: {os.path.basename(original_path)} ({encrypted_size // (1024*1024)} MB)")
 
-            # Расшифровываем файл блоками, чтобы избежать загрузки всего файла в память
-            with open(file_path, 'rb') as infile, open(temp_path, 'wb') as outfile:
-                while True:
-                    # Читаем зашифрованные данные блоками (размер зависит от CHUNK_SIZE и размера аутентификационного тега)
-                    # Для XChaCha20-Poly1305 аутентификационный тег добавляется к каждому блоку
-                    chunk = infile.read(CHUNK_SIZE + 16)  # +16 байт для аутентификационного тега
-                    if not chunk:
-                        break
-
-                    try:
-                        decrypted_chunk = crypto_aead_xchacha20poly1305_decrypt(
-                            ciphertext=chunk,
-                            ad=None,
-                            nonce=nonce,
-                            key=key_for_pynacl
-                        )
-                        outfile.write(decrypted_chunk)
-                    except nacl.exceptions.CryptoError:
-                        raise ValueError("Неверный пароль или повреждённые данные")
+                with open(temp_path, 'wb') as outfile:
+                    for chunk in reader.iter_chunks(chunk_size=CHUNK_SIZE + 16):
+                        try:
+                            decrypted_chunk = crypto_aead_xchacha20poly1305_decrypt(
+                                ciphertext=chunk,
+                                ad=None,
+                                nonce=nonce,
+                                key=key_for_pynacl
+                            )
+                            outfile.write(decrypted_chunk)
+                        except nacl.exceptions.CryptoError:
+                            raise ValueError("Неверный пароль или повреждённые данные")
 
         # Проверяем размер расшифрованного файла
         decrypted_size = os.path.getsize(temp_path)
@@ -502,7 +792,7 @@ def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_h
 
 def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None):
     """Расшифровывает файл с проверкой целостности перед удалением зашифрованной версии.
-    Использует потоковую обработку для больших файлов"""
+    Использует MemorySensitiveReader для улучшенного управления памятью"""
     encrypted_size = os.path.getsize(file_path)
     original_path = file_path.replace(".encrypted", "")
     temp_path = original_path + ".tmp"
@@ -525,29 +815,29 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
     # Если это один из стандартных алгоритмов (AES или ChaCha20), продолжаем стандартную процедуру
 
     try:
-        # Для файлов меньше 100MB используем текущий метод
-        if encrypted_size <= MAX_MEMORY_FILE_SIZE:
-            encrypted_data = Path(file_path).read_bytes()
-            decrypted_data = cipher.decrypt(nonce, encrypted_data, None)
-            Path(temp_path).write_bytes(decrypted_data)
-        else:
-            # Потоковая обработка для больших файлов
-            print(f"[INFO] Потоковое расшифровывание большого файла: {os.path.basename(original_path)} ({encrypted_size // (1024*1024)} MB)")
-
-            # Для AEAD-алгоритмов (AES-GCM, ChaCha20-Poly1305) мы должны расшифровывать файл целиком
-            # для обеспечения аутентификации и целостности
-            try:
-                with open(file_path, 'rb') as infile:
-                    encrypted_data = infile.read()
-
+        # Используем MemorySensitiveReader для автоматического управления памятью
+        with MemorySensitiveReader(file_path) as reader:
+            if not reader.use_streaming:
+                # Для файлов до порога расшифровываем целиком
+                encrypted_data = reader.read_all()
                 decrypted_data = cipher.decrypt(nonce, encrypted_data, None)
+                Path(temp_path).write_bytes(decrypted_data)
+            else:
+                # Потоковая обработка для больших файлов
+                print(f"[INFO] Потоковое расшифровывание большого файла: {os.path.basename(original_path)} ({encrypted_size // (1024*1024)} MB)")
 
-                # Записываем расшифрованные данные во временный файл
-                with open(temp_path, 'wb') as outfile:
-                    outfile.write(decrypted_data)
-            except MemoryError:
-                # Если недостаточно памяти для загрузки всего файла, используем альтернативный подход
-                raise ValueError(f"Файл слишком велик для расшифровки с проверкой целостности. Рассмотрите использование XChaCha20-Poly1305.")
+                # Для AEAD-алгоритмов мы должны расшифровывать файл целиком для целостности
+                # Используем SecureBytes для временного хранения зашифрованных данных
+                with SecureBytes(reader.size) as enc_buffer:
+                    with open(file_path, 'rb') as f:
+                        f.seek(0)
+                        enc_buffer.buffer[:] = f.read()
+                    
+                    try:
+                        decrypted_data = cipher.decrypt(nonce, enc_buffer.data, None)
+                        Path(temp_path).write_bytes(decrypted_data)
+                    except MemoryError:
+                        raise ValueError(f"Файл слишком велик для расшифровки с проверкой целостности. Рассмотрите использование XChaCha20-Poly1305.")
 
         # Проверяем размер расшифрованного файла
         decrypted_size = os.path.getsize(temp_path)
