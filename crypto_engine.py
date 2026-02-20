@@ -566,8 +566,34 @@ class MemorySensitiveReader:
         return self.file_size
 
 
+def _derive_block_nonce(base_nonce: bytes, block_index: int) -> bytes:
+    """
+    Генерирует уникальный 24-байтный nonce для каждого блока на основе базового nonce и индекса блока.
+    
+    Args:
+        base_nonce: Базовый 16-байтный nonce (24 - 8 байт под счётчик)
+        block_index: Индекс блока (0, 1, 2, ...)
+    
+    Returns:
+        24-байтный уникальный nonce для блока
+    """
+    # Используем первые 16 байт как префикс, последние 8 байт — как счётчик блока
+    if len(base_nonce) != 16:
+        # Если передан полный 24-байтный nonce, используем первые 16 байт
+        prefix = base_nonce[:16]
+    else:
+        prefix = base_nonce
+    
+    # Добавляем 8-байтный счётчик (little-endian)
+    block_counter = block_index.to_bytes(8, byteorder='little')
+    return prefix + block_counter
+
+
 def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[bytes, str]:
-    """Шифрует файл с помощью XChaCha20-Poly1305 с улучшенным управлением памятью"""
+    """Шифрует файл с помощью XChaCha20-Poly1305 с улучшенным управлением памятью.
+    
+    Для потокового режима каждый блок шифруется с уникальным nonce (base_nonce + счётчик блока).
+    """
     if not HAS_PYNACL:
         raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
 
@@ -598,19 +624,27 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
                 )
                 Path(temp_path).write_bytes(encrypted_data)
             else:
-                # Для больших файлов используем потоковую обработку
+                # Для больших файлов используем потоковую обработку с уникальным nonce для каждого блока
                 print(f"[INFO] Потоковое шифрование большого файла: {os.path.basename(file_path)} ({file_size // (1024*1024)} MB)")
 
+                # Сохраняем базовый nonce (16 байт) для генерации уникальных nonce блоков
+                base_nonce = nonce[:16]
+                
                 with open(temp_path, 'wb') as outfile:
+                    block_index = 0
                     for chunk in reader.iter_chunks():
-                        # Зашифровываем каждый блок
+                        # Генерируем уникальный nonce для каждого блока
+                        block_nonce = _derive_block_nonce(base_nonce, block_index)
+                        
+                        # Зашифровываем каждый блок с уникальным nonce
                         encrypted_chunk = crypto_aead_xchacha20poly1305_encrypt(
                             message=chunk,
                             ad=None,
-                            nonce=nonce,
+                            nonce=block_nonce,
                             key=key_for_pynacl
                         )
                         outfile.write(encrypted_chunk)
+                        block_index += 1
 
         # Переименовываем временный файл
         if os.path.exists(encrypted_path):
@@ -719,7 +753,10 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
             os.remove(temp_path)
 
 def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_hmac: str = None):
-    """Расшифровывает файл с помощью XChaCha20-Poly1305 с улучшенным управлением памятью"""
+    """Расшифровывает файл с помощью XChaCha20-Poly1305 с улучшенным управлением памятью.
+    
+    Для потокового режима каждый блок расшифровывается с уникальным nonce (base_nonce + счётчик блока).
+    """
     if not HAS_PYNACL:
         raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
 
@@ -750,19 +787,27 @@ def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_h
                 except nacl.exceptions.CryptoError:
                     raise ValueError("Неверный пароль или повреждённые данные")
             else:
-                # Для больших файлов используем потоковую обработку
+                # Для больших файлов используем потоковую обработку с уникальным nonce для каждого блока
                 print(f"[INFO] Потоковое расшифровывание большого файла: {os.path.basename(original_path)} ({encrypted_size // (1024*1024)} MB)")
 
+                # Сохраняем базовый nonce (16 байт) для генерации уникальных nonce блоков
+                base_nonce = nonce[:16]
+                
                 with open(temp_path, 'wb') as outfile:
+                    block_index = 0
                     for chunk in reader.iter_chunks(chunk_size=CHUNK_SIZE + 16):
                         try:
+                            # Генерируем уникальный nonce для каждого блока (тот же, что при шифровании)
+                            block_nonce = _derive_block_nonce(base_nonce, block_index)
+                            
                             decrypted_chunk = crypto_aead_xchacha20poly1305_decrypt(
                                 ciphertext=chunk,
                                 ad=None,
-                                nonce=nonce,
+                                nonce=block_nonce,
                                 key=key_for_pynacl
                             )
                             outfile.write(decrypted_chunk)
+                            block_index += 1
                         except nacl.exceptions.CryptoError:
                             raise ValueError("Неверный пароль или повреждённые данные")
 
