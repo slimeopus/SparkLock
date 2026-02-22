@@ -309,27 +309,6 @@ def verify_encryption_integrity(original_path: str, encrypted_path: str,
         print(f"Ошибка проверки целостности: {e}")
         return False
 
-def verify_decryption_integrity(encrypted_path: str, decrypted_path: str,
-                               original_hash: str, original_hmac: str = None, key: bytes = None) -> bool:
-    """Проверяет целостность расшифрованного файла перед удалением зашифрованного"""
-    try:
-        decrypted_hash = calculate_file_hash(decrypted_path)
-        
-        # Проверяем хеш
-        hash_match = original_hash == decrypted_hash
-        
-        # Проверяем HMAC, если он предоставлен
-        hmac_match = True
-        if original_hmac and key:
-            decrypted_hmac = calculate_hmac(decrypted_path, key)
-            hmac_match = original_hmac == decrypted_hmac
-        
-        # Возвращаем результат проверки по обоим критериям
-        return hash_match and hmac_match
-    except Exception as e:
-        print(f"Ошибка проверки целостности: {e}")
-        return False
-
 # Файлы блокировки и временные метаданные
 LOCK_FILE = ".encryption_lock.json"
 TEMP_METADATA_FILE = ".usb_crypt_meta_temp.json"
@@ -605,6 +584,9 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
 
     # Вычисляем HMAC оригинального файла
     original_hmac = calculate_hmac(file_path, key)
+    
+    # Вычисляем SHA-256 хеш оригинального файла
+    original_hash = calculate_file_hash(file_path)
 
     file_size = os.path.getsize(file_path)
     encrypted_path = file_path + ".encrypted"
@@ -658,14 +640,14 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
 
         # Удаляем исходный файл только после всех проверок
         os.remove(file_path)
-        return nonce, original_hmac
+        return nonce, original_hmac, original_hash
 
     finally:
         # Очищаем временные файлы в случае ошибки
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str]:
+def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str, str]:
     """Шифрует файл с проверкой целостности перед удалением оригинала.
     Использует MemorySensitiveReader для улучшенного управления памятью"""
     file_size = os.path.getsize(file_path)
@@ -687,7 +669,8 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
             raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
         # XChaCha20 использует 24-байтовый nonce
         nonce = randombytes(24)
-        return _encrypt_with_xchacha20(file_path, key, nonce), original_hmac
+        nonce, hmac_from_func, original_hash_from_func = _encrypt_with_xchacha20(file_path, key, nonce)
+        return nonce, original_hmac, original_hash_from_func
     else:
         raise ValueError(f"Неизвестный алгоритм: {algorithm}")
 
@@ -745,7 +728,8 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
 
         # Удаляем исходный файл только после всех проверок
         os.remove(file_path)
-        return nonce, original_hmac
+        # Возвращаем nonce, original_hmac и original_hash (hex) для метаданных
+        return nonce, original_hmac, original_hash.hexdigest()
 
     finally:
         # Очищаем временные файлы в случае ошибки
@@ -835,7 +819,7 @@ def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_h
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None):
+def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None, original_hash: str = None):
     """Расшифровывает файл с проверкой целостности перед удалением зашифрованной версии.
     Использует MemorySensitiveReader для улучшенного управления памятью"""
     encrypted_size = os.path.getsize(file_path)
@@ -890,13 +874,13 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
             os.remove(temp_path)
             raise ValueError(f"Подозрительно маленький размер расшифрованного файла {original_path}")
 
-        # Проверяем целостность через хеш и HMAC
-        decrypted_hash = calculate_file_hash(temp_path)
-
-        # Проверяем целостность
-        if not verify_decryption_integrity(file_path, temp_path, decrypted_hash, original_hmac, key):
-            os.remove(temp_path)
-            raise ValueError(f"Ошибка целостности при расшифровке файла {original_path}")
+        # Проверяем целостность через HMAC (хеш-проверка удалена как бессмысленная)
+        # Основная проверка целостности происходит через HMAC
+        if original_hmac:
+            decrypted_hmac = calculate_hmac(temp_path, key)
+            if original_hmac != decrypted_hmac:
+                os.remove(temp_path)
+                raise ValueError(f"Ошибка целостности HMAC при расшифровке файла {original_path}")
 
         # Заменяем исходный файл
         if os.path.exists(original_path):
@@ -909,7 +893,8 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-def save_metadata(drive_path: str, salt: bytes, file_nonces: dict, file_hmacs: dict, algorithm: str):
+def save_metadata(drive_path: str, salt: bytes, file_nonces: dict, file_hmacs: dict, 
+                  file_hashes: dict, algorithm: str):
     """Сохраняет метаданные на флешку"""
     meta = {
         "algorithm": algorithm,
@@ -918,7 +903,8 @@ def save_metadata(drive_path: str, salt: bytes, file_nonces: dict, file_hmacs: d
             rel_path: {
                 "nonce": base64.b64encode(nonce).decode(),
                 "nonce_size": len(nonce),
-                "hmac": file_hmacs[rel_path]
+                "hmac": file_hmacs[rel_path],
+                "original_hash": file_hashes[rel_path]
             }
             for rel_path, nonce in file_nonces.items()
         }
@@ -937,11 +923,13 @@ def load_metadata(drive_path: str):
     salt = base64.b64decode(meta["salt"])
     files = {}
     file_hmacs = {}
+    file_hashes = {}
     for rel_path, info in meta["files"].items():
         nonce = base64.b64decode(info["nonce"])
         files[rel_path] = nonce
         file_hmacs[rel_path] = info["hmac"]
-    return salt, files, file_hmacs, meta["algorithm"]
+        file_hashes[rel_path] = info["original_hash"]
+    return salt, files, file_hmacs, file_hashes, meta["algorithm"]
 
 def is_encrypted(drive_path: str) -> bool:
     return os.path.exists(os.path.join(drive_path, METADATA_FILE))
@@ -991,14 +979,16 @@ def encrypt_drive(drive_path: str, password: str, algorithm: str = "AES-256-GCM"
         with secure_key(password, salt, key_size) as key:
             file_nonces = {}
             file_hmacs = {}
+            file_hashes = {}
             processed_count = 0
 
             for i, file_path in enumerate(all_files):
                 try:
                     rel_path = os.path.relpath(file_path, drive_path)
-                    nonce, hmac_value = encrypt_file(file_path, algorithm, key)
+                    nonce, hmac_value, original_hash = encrypt_file(file_path, algorithm, key)
                     file_nonces[rel_path] = nonce
                     file_hmacs[rel_path] = hmac_value
+                    file_hashes[rel_path] = original_hash
                     processed_count += 1
                     update_lock(lock_path, rel_path, success=True)
                 except Exception as e:
@@ -1010,7 +1000,7 @@ def encrypt_drive(drive_path: str, password: str, algorithm: str = "AES-256-GCM"
 
             # Сохраняем метаданные во временный файл
             temp_meta_path = os.path.join(drive_path, TEMP_METADATA_FILE)
-            save_metadata(drive_path, salt, file_nonces, file_hmacs, algorithm)
+            save_metadata(drive_path, salt, file_nonces, file_hmacs, file_hashes, algorithm)
             
             # Только после успешного сохранения метаданных переименовываем в основной файл
             meta_path = os.path.join(drive_path, METADATA_FILE)
@@ -1054,7 +1044,7 @@ def decrypt_drive(drive_path: str, password: str, progress_callback=None):
     if not is_strong:
         print("Предупреждение: Используется слабый пароль. Рекомендуется изменить пароль после расшифровки.")
     
-    salt, file_nonces, file_hmacs, algorithm = load_metadata(drive_path)
+    salt, file_nonces, file_hmacs, file_hashes, algorithm = load_metadata(drive_path)
 
     # Создаем файл блокировки
     lock_path = create_lock(drive_path, "decrypt")
@@ -1074,7 +1064,8 @@ def decrypt_drive(drive_path: str, password: str, progress_callback=None):
 
                 try:
                     original_hmac = file_hmacs.get(rel_path)
-                    decrypt_file(encrypted_path, algorithm, key, nonce, original_hmac)
+                    original_hash = file_hashes.get(rel_path)
+                    decrypt_file(encrypted_path, algorithm, key, nonce, original_hmac, original_hash)
                     processed_count += 1
                     update_lock(lock_path, rel_path, success=True)
                 except Exception as e:
@@ -1120,7 +1111,7 @@ def rollback_operation(drive_path: str):
 
     if operation == "encrypt":
         # Для отката шифрования: расшифровываем обработанные файлы
-        salt, file_nonces, algorithm = load_metadata(drive_path)
+        salt, file_nonces, file_hmacs, file_hashes, algorithm = load_metadata(drive_path)
 
         with secure_key(input("Введите пароль для отката: "), salt, 32) as key:
             for file_info in processed_files:
@@ -1128,10 +1119,12 @@ def rollback_operation(drive_path: str):
                     rel_path = file_info["path"]
                     encrypted_path = os.path.join(drive_path, rel_path + ".encrypted")
                     nonce = file_nonces.get(rel_path)
+                    original_hmac = file_hmacs.get(rel_path)
+                    original_hash_val = file_hashes.get(rel_path)
 
                     if nonce and os.path.exists(encrypted_path):
                         try:
-                            decrypt_file(encrypted_path, algorithm, key, nonce)
+                            decrypt_file(encrypted_path, algorithm, key, nonce, original_hmac, original_hash_val)
                             print(f"✅ Откат файла: {rel_path}")
                         except Exception as e:
                             print(f"❌ Ошибка отката файла {rel_path}: {e}")
@@ -1168,59 +1161,59 @@ from threading import Lock
 # Блокировка для синхронизации обновления прогресса
 progress_lock = Lock()
 
-def encrypt_files_parallel(file_paths: List[str], algorithm: str, key: bytes, max_workers: int = 4) -> Dict[str, Tuple[bytes, str]]:
+def encrypt_files_parallel(file_paths: List[str], algorithm: str, key: bytes, max_workers: int = 4) -> Dict[str, Tuple[bytes, str, str]]:
     """
     Параллельно шифрует несколько файлов
-    
+
     Args:
         file_paths: Список путей к файлам для шифрования
         algorithm: Алгоритм шифрования
         key: Ключ шифрования
         max_workers: Максимальное количество потоков
-        
+
     Returns:
-        Словарь с nonce и hmac для каждого файла
+        Словарь с nonce, hmac и original_hash для каждого файла
     """
     results = {}
-    
+
     def encrypt_single_file(file_path: str):
         try:
-            nonce, hmac_value = encrypt_file(file_path, algorithm, key)
-            return file_path, nonce, hmac_value
+            nonce, hmac_value, original_hash = encrypt_file(file_path, algorithm, key)
+            return file_path, nonce, hmac_value, original_hash
         except Exception as e:
             print(f"⚠️ Ошибка шифрования файла {file_path}: {e}")
-            return file_path, None, None
-    
+            return file_path, None, None, None
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Запускаем задачи шифрования
-        future_to_file = {executor.submit(encrypt_single_file, file_path): file_path 
+        future_to_file = {executor.submit(encrypt_single_file, file_path): file_path
                           for file_path in file_paths}
-        
+
         # Обрабатываем результаты
         for future in concurrent.futures.as_completed(future_to_file):
-            file_path, nonce, hmac_value = future.result()
-            if nonce is not None and hmac_value is not None:
-                results[file_path] = (nonce, hmac_value)
-    
+            file_path, nonce, hmac_value, original_hash = future.result()
+            if nonce is not None and hmac_value is not None and original_hash is not None:
+                results[file_path] = (nonce, hmac_value, original_hash)
+
     return results
 
 
-def decrypt_files_parallel(file_paths: List[Tuple[str, str, bytes, bytes, str]], max_workers: int = 4) -> List[bool]:
+def decrypt_files_parallel(file_paths: List[Tuple[str, str, bytes, bytes, str, str]], max_workers: int = 4) -> List[bool]:
     """
     Параллельно расшифровывает несколько файлов
-    
+
     Args:
-        file_paths: Список кортежей (encrypted_path, algorithm, key, nonce, original_hmac)
+        file_paths: Список кортежей (encrypted_path, algorithm, key, nonce, original_hmac, original_hash)
         max_workers: Максимальное количество потоков
-        
+
     Returns:
         Список результатов (успешно ли расшифрован каждый файл)
     """
     results = []
-    
-    def decrypt_single_file(encrypted_path: str, algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None):
+
+    def decrypt_single_file(encrypted_path: str, algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None, original_hash: str = None):
         try:
-            decrypt_file(encrypted_path, algorithm, key, nonce, original_hmac)
+            decrypt_file(encrypted_path, algorithm, key, nonce, original_hmac, original_hash)
             return True
         except Exception as e:
             print(f"⚠️ Ошибка расшифровки файла {encrypted_path}: {e}")
@@ -1298,19 +1291,21 @@ def encrypt_drive_parallel(drive_path: str, password: str, algorithm: str = "AES
         with secure_key(password, salt, key_size) as key:
             # Используем параллельное шифрование
             file_results = encrypt_files_parallel(all_files, algorithm, key, max_workers)
-            
+
             # Подготовим метаданные
             file_nonces = {}
             file_hmacs = {}
-            
-            for file_path, (nonce, hmac_value) in file_results.items():
-                if nonce is not None and hmac_value is not None:
+            file_hashes = {}
+
+            for file_path, (nonce, hmac_value, original_hash) in file_results.items():
+                if nonce is not None and hmac_value is not None and original_hash is not None:
                     rel_path = os.path.relpath(file_path, drive_path)
                     file_nonces[rel_path] = nonce
                     file_hmacs[rel_path] = hmac_value
+                    file_hashes[rel_path] = original_hash
                     processed_count += 1
                     update_lock(lock_path, rel_path, success=True)
-                    
+
                     # Обновляем прогресс
                     if progress_callback:
                         with progress_lock:
@@ -1321,7 +1316,7 @@ def encrypt_drive_parallel(drive_path: str, password: str, algorithm: str = "AES
 
             # Сохраняем метаданные во временный файл
             temp_meta_path = os.path.join(drive_path, TEMP_METADATA_FILE)
-            save_metadata(drive_path, salt, file_nonces, file_hmacs, algorithm)
+            save_metadata(drive_path, salt, file_nonces, file_hmacs, file_hashes, algorithm)
 
             # Только после успешного сохранения метаданных переименовываем в основной файл
             meta_path = os.path.join(drive_path, METADATA_FILE)
@@ -1375,7 +1370,7 @@ def decrypt_drive_parallel(drive_path: str, password: str, max_workers: int = 4,
     if not is_strong:
         print("Предупреждение: Используется слабый пароль. Рекомендуется изменить пароль после расшифровки.")
 
-    salt, file_nonces, file_hmacs, algorithm = load_metadata(drive_path)
+    salt, file_nonces, file_hmacs, file_hashes, algorithm = load_metadata(drive_path)
 
     # Создаем файл блокировки
     lock_path = create_lock(drive_path, "decrypt")
@@ -1390,10 +1385,11 @@ def decrypt_drive_parallel(drive_path: str, password: str, max_workers: int = 4,
             for rel_path, nonce in file_nonces.items():
                 encrypted_path = os.path.join(drive_path, rel_path + ".encrypted")
                 original_hmac = file_hmacs.get(rel_path)
-                
+                original_hash_val = file_hashes.get(rel_path)
+
                 if os.path.exists(encrypted_path):
-                    files_to_decrypt.append((encrypted_path, algorithm, key, nonce, original_hmac))
-            
+                    files_to_decrypt.append((encrypted_path, algorithm, key, nonce, original_hmac, original_hash_val))
+
             # Используем параллельную расшифровку
             results = decrypt_files_parallel(files_to_decrypt, max_workers)
             
