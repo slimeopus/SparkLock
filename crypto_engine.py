@@ -381,18 +381,6 @@ def check_disk_space(drive_path: str, required_space: int) -> bool:
             print("⚠️ Не удалось проверить свободное место на диске")
             return True  # Продолжаем с предупреждением
 
-def secure_wipe(data: bytearray):
-    """Безопасно очищает содержимое bytearray, перезаписывая его случайными данными, затем нулями"""
-    if not isinstance(data, bytearray):
-        raise TypeError("Можно очистить только bytearray")
-    # Сначала перезаписываем случайными данными
-    random_data = secrets.token_bytes(len(data))
-    data[:] = random_data
-    # Затем перезаписываем нулями
-    data[:] = b'\x00' * len(data)
-    # Принудительно запускаем сборку мусора
-    import gc
-    gc.collect()
 
 @contextmanager
 def secure_key(password: str, salt: bytes, key_size: int = 32):
@@ -913,18 +901,64 @@ def save_metadata(drive_path: str, salt: bytes, file_nonces: dict, file_hmacs: d
     with open(meta_path, 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2)
 
+# Максимальный размер файла метаданных (10 MB - защита от DoS-атак)
+MAX_METADATA_SIZE = 10 * 1024 * 1024
+
+
 def load_metadata(drive_path: str):
-    """Загружает метаданные с флешки"""
+    """
+    Загружает метаданные с флешки с проверкой на переполнение памяти.
+    
+    Перед загрузкой проверяется размер файла метаданных для предотвращения
+    атак типа "отказ в обслуживании" через подмену метаданных на очень большой файл.
+    """
     meta_path = os.path.join(drive_path, METADATA_FILE)
     if not os.path.exists(meta_path):
         raise FileNotFoundError("Метаданные не найдены. Устройство не зашифровано.")
+    
+    # Проверяем размер файла перед загрузкой
+    file_size = os.path.getsize(meta_path)
+    if file_size > MAX_METADATA_SIZE:
+        raise MemoryError(
+            f"Файл метаданных слишком большой ({file_size / (1024*1024):.2f} MB). "
+            f"Максимальный размер: {MAX_METADATA_SIZE / (1024*1024):.2f} MB. "
+            "Возможна атака на переполнение памяти."
+        )
+    
+    # Проверяем доступность памяти перед загрузкой
+    if not _memory_monitor.check_memory_available(file_size):
+        raise MemoryError(
+            f"Недостаточно доступной памяти для загрузки метаданных ({file_size / (1024*1024):.2f} MB)"
+        )
+    
     with open(meta_path, 'r', encoding='utf-8') as f:
         meta = json.load(f)
+    
+    # Валидируем структуру метаданных
+    if not isinstance(meta, dict):
+        raise ValueError("Неверная структура метаданных: ожидается объект")
+    if "salt" not in meta or "files" not in meta or "algorithm" not in meta:
+        raise ValueError("Неверная структура метаданных: отсутствуют обязательные поля")
+    if not isinstance(meta["files"], dict):
+        raise ValueError("Неверная структура метаданных: поле 'files' должно быть объектом")
+    
+    # Ограничиваем количество файлов для предотвращения атак
+    max_files = 100000  # Максимум 100,000 файлов
+    if len(meta["files"]) > max_files:
+        raise ValueError(
+            f"Слишком много файлов в метаданных: {len(meta['files'])}. "
+            f"Максимум: {max_files}"
+        )
+    
     salt = base64.b64decode(meta["salt"])
     files = {}
     file_hmacs = {}
     file_hashes = {}
     for rel_path, info in meta["files"].items():
+        # Валидируем структуру каждого элемента
+        if not all(key in info for key in ("nonce", "hmac", "original_hash")):
+            raise ValueError(f"Неверная структура метаданных для файла: {rel_path}")
+        
         nonce = base64.b64decode(info["nonce"])
         files[rel_path] = nonce
         file_hmacs[rel_path] = info["hmac"]
