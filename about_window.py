@@ -34,7 +34,7 @@ class AboutWindow:
 
         self.version_label = tk.Label(info_frame, text=self.lang_manager.t("about_window.version"), font=("Arial", 10, "bold"), anchor="w")
         self.version_label.grid(row=0, column=0, sticky="w", pady=2)
-        self.version_value_label = tk.Label(info_frame, text="3.5.1", font=("Arial", 10), anchor="w")
+        self.version_value_label = tk.Label(info_frame, text="3.7.6", font=("Arial", 10), anchor="w")
         self.version_value_label.grid(row=0, column=1, sticky="w", padx=10, pady=2)
 
         self.developer_label = tk.Label(info_frame, text=self.lang_manager.t("about_window.developer"), font=("Arial", 10, "bold"), anchor="w")
