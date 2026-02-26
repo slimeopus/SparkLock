@@ -273,19 +273,29 @@ def verify_encryption_integrity(original_path: str, encrypted_path: str,
             cipher = ChaCha20Poly1305(key)
             decrypted_data = cipher.decrypt(nonce, encrypted_data, None)
         elif algorithm == "XChaCha20-Poly1305":
-            # Для XChaCha20-Poly1305 проверка целостности не поддерживается в этой функции
-            # потому что она использует другую библиотеку и имеет другие особенности
-            print("⚠️ Проверка целостности для XChaCha20-Poly1305 не поддерживается в этой версии")
-            return True
+            if not HAS_PYNACL:
+                raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
+            
+            # Для XChaCha20-Poly1305 расшифровываем и проверяем хеш
+            try:
+                decrypted_data = crypto_aead_xchacha20poly1305_decrypt(
+                    ciphertext=encrypted_data,
+                    ad=None,
+                    nonce=nonce,
+                    key=key
+                )
+            except nacl.exceptions.CryptoError:
+                print("❌ Ошибка расшифровки при проверке целостности XChaCha20-Poly1305")
+                return False
         else:
             raise ValueError(f"Неизвестный алгоритм: {algorithm}")
 
-        if algorithm in ["AES-256-GCM", "ChaCha20"]:
+        if algorithm in ["AES-256-GCM", "ChaCha20", "XChaCha20-Poly1305"]:
             decrypted_hash = hashlib.sha256(decrypted_data).hexdigest()
 
             # Сравниваем хеши
             hash_match = original_hash == decrypted_hash
-            
+
             # Проверяем HMAC, если он предоставлен
             hmac_match = True
             if original_hmac:
@@ -293,7 +303,7 @@ def verify_encryption_integrity(original_path: str, encrypted_path: str,
                 with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                     temp_file.write(decrypted_data)
                     temp_path = temp_file.name
-                
+
                 try:
                     decrypted_hmac = calculate_hmac(temp_path, key)
                     hmac_match = original_hmac == decrypted_hmac
@@ -626,7 +636,84 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
             os.remove(encrypted_path)
             raise ValueError(f"Подозрительный размер зашифрованного файла {file_path}. Исходный файл сохранен.")
 
-        # Удаляем исходный файл только после всех проверок
+        # === ПРОВЕРКА ЦЕЛОСТНОСТИ: расшифровываем и сравниваем хеш ===
+        try:
+            with MemorySensitiveReader(encrypted_path) as reader:
+                if not reader.use_streaming:
+                    # Для файлов до порога расшифровываем целиком и проверяем хеш
+                    encrypted_data = reader.read_all()
+                    try:
+                        decrypted_data = crypto_aead_xchacha20poly1305_decrypt(
+                            ciphertext=encrypted_data,
+                            ad=None,
+                            nonce=nonce,
+                            key=key_for_pynacl
+                        )
+                    except nacl.exceptions.CryptoError:
+                        raise ValueError("Ошибка шифрования: данные не могут быть расшифрованы")
+                    
+                    # Сравниваем хеш расшифрованных данных с оригинальным
+                    decrypted_hash = hashlib.sha256(decrypted_data).hexdigest()
+                    if decrypted_hash != original_hash:
+                        raise ValueError("Ошибка целостности: хеш расшифрованных данных не совпадает")
+                    
+                    # Сравниваем HMAC
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                        temp_file.write(decrypted_data)
+                        temp_path_hmac = temp_file.name
+                    try:
+                        decrypted_hmac = calculate_hmac(temp_path_hmac, key)
+                        if decrypted_hmac != original_hmac:
+                            raise ValueError("Ошибка целостности: HMAC не совпадает")
+                    finally:
+                        os.unlink(temp_path_hmac)
+                    
+                    # Очищаем decrypted_data из памяти
+                    del decrypted_data
+                    gc.collect()
+                else:
+                    # Для больших файлов проверяем каждый блок потоково
+                    print(f"[INFO] Проверка целостности зашифрованного файла: {os.path.basename(file_path)}")
+                    
+                    base_nonce = nonce[:16]
+                    temp_verify_path = temp_path + ".verify"
+                    
+                    with open(temp_verify_path, 'wb') as verify_file:
+                        block_index = 0
+                        for chunk in reader.iter_chunks(chunk_size=CHUNK_SIZE + 16):
+                            try:
+                                block_nonce = _derive_block_nonce(base_nonce, block_index)
+                                decrypted_chunk = crypto_aead_xchacha20poly1305_decrypt(
+                                    ciphertext=chunk,
+                                    ad=None,
+                                    nonce=block_nonce,
+                                    key=key_for_pynacl
+                                )
+                                verify_file.write(decrypted_chunk)
+                                block_index += 1
+                            except nacl.exceptions.CryptoError:
+                                raise ValueError("Ошибка шифрования: данные не могут быть расшифрованы")
+                    
+                    # Проверяем хеш и HMAC расшифрованного файла
+                    decrypted_hash = calculate_file_hash(temp_verify_path)
+                    if decrypted_hash != original_hash:
+                        os.remove(temp_verify_path)
+                        raise ValueError("Ошибка целостности: хеш расшифрованных данных не совпадает")
+                    
+                    decrypted_hmac = calculate_hmac(temp_verify_path, key)
+                    if decrypted_hmac != original_hmac:
+                        os.remove(temp_verify_path)
+                        raise ValueError("Ошибка целостности: HMAC не совпадает")
+                    
+                    os.remove(temp_verify_path)
+        except Exception as e:
+            # Если проверка не прошла, удаляем зашифрованный файл и оставляем оригинал
+            os.remove(encrypted_path)
+            raise ValueError(f"Ошибка проверки целостности при шифровании {file_path}: {e}. Исходный файл сохранен.")
+        # === КОНЕЦ ПРОВЕРКИ ЦЕЛОСТНОСТИ ===
+
+        # Удаляем исходный файл только после успешной проверки целостности
         os.remove(file_path)
         return nonce, original_hmac, original_hash
 
