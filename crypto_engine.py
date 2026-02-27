@@ -811,9 +811,9 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_hmac: str = None):
+def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_hmac: str = None, original_hash: str = None):
     """Расшифровывает файл с помощью XChaCha20-Poly1305 с улучшенным управлением памятью.
-    
+
     Для потокового режима каждый блок расшифровывается с уникальным nonce (base_nonce + счётчик блока).
     """
     if not HAS_PYNACL:
@@ -851,14 +851,14 @@ def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_h
 
                 # Сохраняем базовый nonce (16 байт) для генерации уникальных nonce блоков
                 base_nonce = nonce[:16]
-                
+
                 with open(temp_path, 'wb') as outfile:
                     block_index = 0
                     for chunk in reader.iter_chunks(chunk_size=CHUNK_SIZE + 16):
                         try:
                             # Генерируем уникальный nonce для каждого блока (тот же, что при шифровании)
                             block_nonce = _derive_block_nonce(base_nonce, block_index)
-                            
+
                             decrypted_chunk = crypto_aead_xchacha20poly1305_decrypt(
                                 ciphertext=chunk,
                                 ad=None,
@@ -912,7 +912,7 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
         # XChaCha20 использует 24-байтовый nonce
         if len(nonce) != 24:
             raise ValueError("XChaCha20-Poly1305 требует 24-байтовый nonce")
-        return _decrypt_with_xchacha20(file_path, key, nonce, original_hmac)
+        return _decrypt_with_xchacha20(file_path, key, nonce, original_hmac, original_hash)
     else:
         raise ValueError(f"Неизвестный алгоритм: {algorithm}")
 
@@ -1282,7 +1282,7 @@ from threading import Lock
 # Блокировка для синхронизации обновления прогресса
 progress_lock = Lock()
 
-def encrypt_files_parallel(file_paths: List[str], algorithm: str, key: bytes, max_workers: int = 4) -> Dict[str, Tuple[bytes, str, str]]:
+def encrypt_files_parallel(file_paths: List[str], algorithm: str, key: bytes, max_workers: int = 4) -> Dict[str, Optional[Tuple[bytes, str, str]]]:
     """
     Параллельно шифрует несколько файлов
 
@@ -1293,17 +1293,17 @@ def encrypt_files_parallel(file_paths: List[str], algorithm: str, key: bytes, ma
         max_workers: Максимальное количество потоков
 
     Returns:
-        Словарь с nonce, hmac и original_hash для каждого файла
+        Словарь {file_path: (nonce, hmac, original_hash) или None при ошибке}
     """
     results = {}
 
     def encrypt_single_file(file_path: str):
         try:
             nonce, hmac_value, original_hash = encrypt_file(file_path, algorithm, key)
-            return file_path, nonce, hmac_value, original_hash
+            return file_path, (nonce, hmac_value, original_hash)
         except Exception as e:
             print(f"⚠️ Ошибка шифрования файла {file_path}: {e}")
-            return file_path, None, None, None
+            return file_path, None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Запускаем задачи шифрования
@@ -1312,14 +1312,13 @@ def encrypt_files_parallel(file_paths: List[str], algorithm: str, key: bytes, ma
 
         # Обрабатываем результаты
         for future in concurrent.futures.as_completed(future_to_file):
-            file_path, nonce, hmac_value, original_hash = future.result()
-            if nonce is not None and hmac_value is not None and original_hash is not None:
-                results[file_path] = (nonce, hmac_value, original_hash)
+            file_path, result = future.result()
+            results[file_path] = result
 
     return results
 
 
-def decrypt_files_parallel(file_paths: List[Tuple[str, str, bytes, bytes, str, str]], max_workers: int = 4) -> List[bool]:
+def decrypt_files_parallel(file_paths: List[Tuple[str, str, bytes, bytes, str, str]], max_workers: int = 4) -> Dict[str, bool]:
     """
     Параллельно расшифровывает несколько файлов
 
@@ -1328,30 +1327,30 @@ def decrypt_files_parallel(file_paths: List[Tuple[str, str, bytes, bytes, str, s
         max_workers: Максимальное количество потоков
 
     Returns:
-        Список результатов (успешно ли расшифрован каждый файл)
+        Словарь {encrypted_path: success} с результатами расшифровки каждого файла
     """
-    results = []
+    results = {}
 
     def decrypt_single_file(encrypted_path: str, algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None, original_hash: str = None):
         try:
             decrypt_file(encrypted_path, algorithm, key, nonce, original_hmac, original_hash)
-            return True
+            return encrypted_path, True
         except Exception as e:
             print(f"⚠️ Ошибка расшифровки файла {encrypted_path}: {e}")
-            return False
-    
+            return encrypted_path, False
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Подготовим аргументы для каждой задачи
         futures = []
-        for encrypted_path, algorithm, key, nonce, original_hmac in file_paths:
-            future = executor.submit(decrypt_single_file, encrypted_path, algorithm, key, nonce, original_hmac)
+        for encrypted_path, algorithm, key, nonce, original_hmac, original_hash in file_paths:
+            future = executor.submit(decrypt_single_file, encrypted_path, algorithm, key, nonce, original_hmac, original_hash)
             futures.append(future)
-        
+
         # Обрабатываем результаты
         for future in concurrent.futures.as_completed(futures):
-            success = future.result()
-            results.append(success)
-    
+            encrypted_path, success = future.result()
+            results[encrypted_path] = success
+
     return results
 
 
@@ -1418,22 +1417,24 @@ def encrypt_drive_parallel(drive_path: str, password: str, algorithm: str = "AES
             file_hmacs = {}
             file_hashes = {}
 
-            for file_path, (nonce, hmac_value, original_hash) in file_results.items():
-                if nonce is not None and hmac_value is not None and original_hash is not None:
-                    rel_path = os.path.relpath(file_path, drive_path)
+            completed_count = 0
+            for file_path, result in file_results.items():
+                rel_path = os.path.relpath(file_path, drive_path)
+                if result is not None:
+                    nonce, hmac_value, original_hash = result
                     file_nonces[rel_path] = nonce
                     file_hmacs[rel_path] = hmac_value
                     file_hashes[rel_path] = original_hash
                     processed_count += 1
                     update_lock(lock_path, rel_path, success=True)
-
-                    # Обновляем прогресс
-                    if progress_callback:
-                        with progress_lock:
-                            progress_callback(processed_count, total)
                 else:
-                    rel_path = os.path.relpath(file_path, drive_path)
                     update_lock(lock_path, rel_path, success=False)
+                completed_count += 1
+
+                # Обновляем прогресс
+                if progress_callback:
+                    with progress_lock:
+                        progress_callback(completed_count, total)
 
             # Сохраняем метаданные во временный файл
             temp_meta_path = os.path.join(drive_path, TEMP_METADATA_FILE)
@@ -1513,19 +1514,23 @@ def decrypt_drive_parallel(drive_path: str, password: str, max_workers: int = 4,
 
             # Используем параллельную расшифровку
             results = decrypt_files_parallel(files_to_decrypt, max_workers)
-            
-            # Обновляем статусы
-            for i, (rel_path, nonce) in enumerate(file_nonces.items()):
-                if i < len(results) and results[i]:
+
+            # Обновляем статусы по пути к зашифрованному файлу
+            completed_count = 0
+            for rel_path, nonce in file_nonces.items():
+                encrypted_path = os.path.join(drive_path, rel_path + ".encrypted")
+                success = results.get(encrypted_path, False)
+                if success:
                     processed_count += 1
                     update_lock(lock_path, rel_path, success=True)
                 else:
                     update_lock(lock_path, rel_path, success=False)
+                completed_count += 1
 
                 # Обновляем прогресс
                 if progress_callback:
                     with progress_lock:
-                        progress_callback(min(i + 1, total), total)
+                        progress_callback(completed_count, total)
 
             # Обновляем статус блокировки
             with open(lock_path, 'r', encoding='utf-8') as f:
