@@ -259,8 +259,23 @@ def calculate_hmac(file_path: str, key: bytes) -> str:
     return hmac_obj.hexdigest()
 
 def verify_encryption_integrity(original_path: str, encrypted_path: str,
-                               algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None) -> bool:
-    """Проверяет целостность зашифрованного файла перед удалением оригинала"""
+                               algorithm: str, key: bytes, base_nonce: bytes, original_hmac: str = None) -> bool:
+    """
+    Проверяет целостность зашифрованного файла перед удалением оригинала.
+    Поддерживает только AES-256-GCM и ChaCha20 для файлов малого размера (до 100MB).
+    Для больших файлов проверка выполняется внутри _encrypt_with_xchacha20.
+    
+    Args:
+        original_path: Путь к оригинальному файлу (должен существовать)
+        encrypted_path: Путь к зашифрованному файлу
+        algorithm: Алгоритм шифрования ("AES-256-GCM" или "ChaCha20")
+        key: Ключ шифрования
+        base_nonce: Базовый nonce (8 байт для AES/ChaCha20)
+        original_hmac: Оригинальный HMAC файла (опционально)
+    
+    Returns:
+        True если целостность подтверждена, False иначе
+    """
     try:
         original_hash = calculate_file_hash(original_path)
         encrypted_data = Path(encrypted_path).read_bytes()
@@ -268,53 +283,41 @@ def verify_encryption_integrity(original_path: str, encrypted_path: str,
         # Пробуем расшифровать для проверки
         if algorithm == "AES-256-GCM":
             cipher = AESGCM(key)
-            decrypted_data = cipher.decrypt(nonce, encrypted_data, None)
+            # Для малых файлов nonce = base_nonce (8 байт), cipher дополнит до 12 байт
+            full_nonce = base_nonce if len(base_nonce) == 12 else base_nonce + b'\x00\x00\x00\x00'
+            decrypted_data = cipher.decrypt(full_nonce, encrypted_data, None)
         elif algorithm == "ChaCha20":
             cipher = ChaCha20Poly1305(key)
-            decrypted_data = cipher.decrypt(nonce, encrypted_data, None)
-        elif algorithm == "XChaCha20-Poly1305":
-            if not HAS_PYNACL:
-                raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
-            
-            # Для XChaCha20-Poly1305 расшифровываем и проверяем хеш
-            try:
-                decrypted_data = crypto_aead_xchacha20poly1305_decrypt(
-                    ciphertext=encrypted_data,
-                    ad=None,
-                    nonce=nonce,
-                    key=key
-                )
-            except nacl.exceptions.CryptoError:
-                print("❌ Ошибка расшифровки при проверке целостности XChaCha20-Poly1305")
-                return False
+            full_nonce = base_nonce if len(base_nonce) == 12 else base_nonce + b'\x00\x00\x00\x00'
+            decrypted_data = cipher.decrypt(full_nonce, encrypted_data, None)
         else:
             raise ValueError(f"Неизвестный алгоритм: {algorithm}")
 
-        if algorithm in ["AES-256-GCM", "ChaCha20", "XChaCha20-Poly1305"]:
-            decrypted_hash = hashlib.sha256(decrypted_data).hexdigest()
+        decrypted_hash = hashlib.sha256(decrypted_data).hexdigest()
 
-            # Сравниваем хеши
-            hash_match = original_hash == decrypted_hash
+        # Сравниваем хеши
+        hash_match = original_hash == decrypted_hash
 
-            # Проверяем HMAC, если он предоставлен
-            hmac_match = True
-            if original_hmac:
-                # Создаем временный файл для проверки HMAC
-                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                    temp_file.write(decrypted_data)
-                    temp_path = temp_file.name
+        # Проверяем HMAC, если он предоставлен
+        hmac_match = True
+        if original_hmac:
+            # Создаем временный файл для проверки HMAC
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                temp_file.write(decrypted_data)
+                temp_path = temp_file.name
 
-                try:
-                    decrypted_hmac = calculate_hmac(temp_path, key)
-                    hmac_match = original_hmac == decrypted_hmac
-                finally:
-                    os.unlink(temp_path)
-            
-            # Возвращаем результат проверки по обоим критериям
-            return hash_match and hmac_match
-        else:
-            # Для XChaCha20-Poly1305 просто возвращаем True, так как проверка не выполнена
-            return True
+            try:
+                decrypted_hmac = calculate_hmac(temp_path, key)
+                hmac_match = original_hmac == decrypted_hmac
+            finally:
+                os.unlink(temp_path)
+
+        # Очищаем decrypted_data из памяти
+        del decrypted_data
+        gc.collect()
+
+        # Возвращаем результат проверки по обоим критериям
+        return hash_match and hmac_match
     except Exception as e:
         print(f"Ошибка проверки целостности: {e}")
         return False
@@ -543,14 +546,39 @@ class MemorySensitiveReader:
         return self.file_size
 
 
+def _derive_block_nonce_12bit(base_nonce: bytes, block_index: int) -> bytes:
+    """
+    Генерирует уникальный 12-байтный nonce для каждого блока на основе базового nonce и индекса блока.
+    Используется для AES-256-GCM и ChaCha20 (требуют 12-байтный nonce).
+
+    Args:
+        base_nonce: Базовый 8-байтный nonce (12 - 4 байта под счётчик)
+        block_index: Индекс блока (0, 1, 2, ...)
+
+    Returns:
+        12-байтный уникальный nonce для блока
+    """
+    # Используем первые 8 байт как префикс, последние 4 байта — как счётчик блока
+    if len(base_nonce) != 8:
+        # Если передан полный 12-байтный nonce, используем первые 8 байт
+        prefix = base_nonce[:8]
+    else:
+        prefix = base_nonce
+
+    # Добавляем 4-байтный счётчик (big-endian, как требует AES-GCM)
+    block_counter = block_index.to_bytes(4, byteorder='big')
+    return prefix + block_counter
+
+
 def _derive_block_nonce(base_nonce: bytes, block_index: int) -> bytes:
     """
     Генерирует уникальный 24-байтный nonce для каждого блока на основе базового nonce и индекса блока.
-    
+    Используется для XChaCha20-Poly1305 (требует 24-байтный nonce).
+
     Args:
         base_nonce: Базовый 16-байтный nonce (24 - 8 байт под счётчик)
         block_index: Индекс блока (0, 1, 2, ...)
-    
+
     Returns:
         24-байтный уникальный nonce для блока
     """
@@ -560,7 +588,7 @@ def _derive_block_nonce(base_nonce: bytes, block_index: int) -> bytes:
         prefix = base_nonce[:16]
     else:
         prefix = base_nonce
-    
+
     # Добавляем 8-байтный счётчик (little-endian)
     block_counter = block_index.to_bytes(8, byteorder='little')
     return prefix + block_counter
@@ -724,7 +752,11 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
 
 def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str, str]:
     """Шифрует файл с проверкой целостности перед удалением оригинала.
-    Использует MemorySensitiveReader для улучшенного управления памятью"""
+    Использует MemorySensitiveReader для улучшенного управления памятью.
+    
+    Для больших файлов (>100MB) используется потоковая обработка с уникальным nonce для каждого блока.
+    Возвращает base_nonce (8 байт) для AES/ChaCha20, 24 байта для XChaCha20.
+    """
     file_size = os.path.getsize(file_path)
 
     # Вычисляем HMAC оригинального файла
@@ -732,13 +764,11 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
 
     # Определяем алгоритм шифрования
     if algorithm == "AES-256-GCM":
-        # Генерируем nonce
-        nonce = os.urandom(12)
-        cipher = AESGCM(key)
+        # Генерируем базовый nonce (8 байт для префикса, 4 байта резервируем под счётчик)
+        base_nonce = os.urandom(8)
     elif algorithm == "ChaCha20":
-        # Генерируем nonce
-        nonce = os.urandom(12)
-        cipher = ChaCha20Poly1305(key)
+        # Генерируем базовый nonce (8 байт для префикса, 4 байта резервируем под счётчик)
+        base_nonce = os.urandom(8)
     elif algorithm == "XChaCha20-Poly1305":
         if not HAS_PYNACL:
             raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
@@ -755,35 +785,42 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
     original_hash = hashlib.sha256()
 
     try:
+        # Выбираем cipher в зависимости от алгоритма
+        if algorithm == "AES-256-GCM":
+            cipher = AESGCM(key)
+        else:  # ChaCha20
+            cipher = ChaCha20Poly1305(key)
+        
+        # Полный nonce для малых файлов (8 байт base + 4 байта нули = 12 байт)
+        full_nonce = base_nonce + b'\x00\x00\x00\x00'
+
         # Используем MemorySensitiveReader для автоматического управления памятью
         with MemorySensitiveReader(file_path) as reader:
             if not reader.use_streaming:
                 # Для файлов до порога шифруем целиком в памяти
                 data = reader.read_all()
                 original_hash.update(data)
-                encrypted_data = cipher.encrypt(nonce, data, None)
+                
+                encrypted_data = cipher.encrypt(full_nonce, data, None)
                 Path(temp_path).write_bytes(encrypted_data)
             else:
-                # Потоковая обработка для больших файлов
+                # Потоковая обработка для больших файлов с уникальным nonce для каждого блока
                 print(f"[INFO] Потоковое шифрование большого файла: {os.path.basename(file_path)} ({file_size // (1024*1024)} MB)")
 
                 # Вычисляем хеш оригинального файла потоково
                 for chunk in reader.iter_chunks():
                     original_hash.update(chunk)
 
-                # Для AEAD-алгоритмов мы должны шифровать файл целиком для целостности
-                # Используем SecureBytes для временного хранения данных
-                with SecureBytes(reader.size) as data_buffer:
-                    # Читаем файл в безопасный буфер
-                    with open(file_path, 'rb') as f:
-                        f.seek(0)
-                        data_buffer.buffer[:] = f.read()
-                    
-                    try:
-                        encrypted_data = cipher.encrypt(nonce, data_buffer.data, None)
-                        Path(temp_path).write_bytes(encrypted_data)
-                    except MemoryError:
-                        raise ValueError(f"Файл слишком велик для шифрования с проверкой целостности. Рассмотрите использование XChaCha20-Poly1305.")
+                with open(temp_path, 'wb') as outfile:
+                    block_index = 0
+                    for chunk in reader.iter_chunks():
+                        # Генерируем уникальный nonce для каждого блока
+                        block_nonce = _derive_block_nonce_12bit(base_nonce, block_index)
+                        
+                        # Зашифровываем блок с уникальным nonce
+                        encrypted_chunk = cipher.encrypt(block_nonce, chunk, None)
+                        outfile.write(encrypted_chunk)
+                        block_index += 1
 
         # Переименовываем временный файл
         if os.path.exists(encrypted_path):
@@ -792,7 +829,7 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
 
         # Проверяем целостность (для XChaCha20-Poly1305 эта проверка не поддерживается в текущей реализации)
         if algorithm in ["AES-256-GCM", "ChaCha20"]:
-            if not verify_encryption_integrity(file_path, encrypted_path, algorithm, key, nonce, original_hmac):
+            if not verify_encryption_integrity(file_path, encrypted_path, algorithm, key, base_nonce, original_hmac):
                 os.remove(encrypted_path)
                 raise ValueError(f"Ошибка целостности при шифровании файла {file_path}. Исходный файл сохранен.")
 
@@ -803,8 +840,8 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
 
         # Удаляем исходный файл только после всех проверок
         os.remove(file_path)
-        # Возвращаем nonce, original_hmac и original_hash (hex) для метаданных
-        return nonce, original_hmac, original_hash.hexdigest()
+        # Возвращаем base_nonce (8 байт), original_hmac и original_hash (hex) для метаданных
+        return base_nonce, original_hmac, original_hash.hexdigest()
 
     finally:
         # Очищаем временные файлы в случае ошибки
@@ -896,7 +933,11 @@ def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_h
 
 def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, original_hmac: str = None, original_hash: str = None):
     """Расшифровывает файл с проверкой целостности перед удалением зашифрованной версии.
-    Использует MemorySensitiveReader для улучшенного управления памятью"""
+    Использует MemorySensitiveReader для улучшенного управления памятью.
+    
+    Для больших файлов (>100MB) используется потоковая расшифровка с уникальным nonce для каждого блока.
+    nonce здесь — это base_nonce (8 байт для AES/ChaCha20, 24 байта для XChaCha20).
+    """
     encrypted_size = os.path.getsize(file_path)
     original_path = file_path.replace(".encrypted", "")
     temp_path = original_path + ".tmp"
@@ -904,8 +945,10 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
     # Определяем алгоритм расшифровки
     if algorithm == "AES-256-GCM":
         cipher = AESGCM(key)
+        base_nonce = nonce  # 8 байт
     elif algorithm == "ChaCha20":
         cipher = ChaCha20Poly1305(key)
+        base_nonce = nonce  # 8 байт
     elif algorithm == "XChaCha20-Poly1305":
         if not HAS_PYNACL:
             raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
@@ -917,6 +960,8 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
         raise ValueError(f"Неизвестный алгоритм: {algorithm}")
 
     # Если это один из стандартных алгоритмов (AES или ChaCha20), продолжаем стандартную процедуру
+    # Полный nonce для малых файлов (8 байт base + 4 байта нули = 12 байт)
+    full_nonce = base_nonce + b'\x00\x00\x00\x00'
 
     try:
         # Используем MemorySensitiveReader для автоматического управления памятью
@@ -924,24 +969,24 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
             if not reader.use_streaming:
                 # Для файлов до порога расшифровываем целиком
                 encrypted_data = reader.read_all()
-                decrypted_data = cipher.decrypt(nonce, encrypted_data, None)
+                decrypted_data = cipher.decrypt(full_nonce, encrypted_data, None)
                 Path(temp_path).write_bytes(decrypted_data)
             else:
-                # Потоковая обработка для больших файлов
+                # Потоковая обработка для больших файлов с уникальным nonce для каждого блока
                 print(f"[INFO] Потоковое расшифровывание большого файла: {os.path.basename(original_path)} ({encrypted_size // (1024*1024)} MB)")
 
-                # Для AEAD-алгоритмов мы должны расшифровывать файл целиком для целостности
-                # Используем SecureBytes для временного хранения зашифрованных данных
-                with SecureBytes(reader.size) as enc_buffer:
-                    with open(file_path, 'rb') as f:
-                        f.seek(0)
-                        enc_buffer.buffer[:] = f.read()
-                    
-                    try:
-                        decrypted_data = cipher.decrypt(nonce, enc_buffer.data, None)
-                        Path(temp_path).write_bytes(decrypted_data)
-                    except MemoryError:
-                        raise ValueError(f"Файл слишком велик для расшифровки с проверкой целостности. Рассмотрите использование XChaCha20-Poly1305.")
+                with open(temp_path, 'wb') as outfile:
+                    block_index = 0
+                    for chunk in reader.iter_chunks(chunk_size=CHUNK_SIZE + 16):  # +16 байт на аутентификационный тег
+                        try:
+                            # Генерируем уникальный nonce для каждого блока (тот же, что при шифровании)
+                            block_nonce = _derive_block_nonce_12bit(base_nonce, block_index)
+
+                            decrypted_chunk = cipher.decrypt(block_nonce, chunk, None)
+                            outfile.write(decrypted_chunk)
+                            block_index += 1
+                        except Exception as e:
+                            raise ValueError(f"Неверный пароль или повреждённые данные: {e}")
 
         # Проверяем размер расшифрованного файла
         decrypted_size = os.path.getsize(temp_path)
