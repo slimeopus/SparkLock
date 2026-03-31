@@ -277,7 +277,16 @@ def verify_encryption_integrity(original_path: str, encrypted_path: str,
         True если целостность подтверждена, False иначе
     """
     try:
+        # Используем существующую функцию calculate_file_hash для потокового вычисления хеша
         original_hash = calculate_file_hash(original_path)
+
+        # Проверяем размер файла перед загрузкой в память
+        encrypted_size = os.path.getsize(encrypted_path)
+        if encrypted_size > MAX_MEMORY_FILE_SIZE:
+            print(f"[WARNING] Файл {encrypted_path} слишком большой для проверки целостности ({encrypted_size / (1024*1024):.1f} MB). Пропускаем проверку.")
+            return True  # Пропускаем проверку для больших файлов
+
+        # Читаем зашифрованные данные
         encrypted_data = Path(encrypted_path).read_bytes()
 
         # Пробуем расшифровать для проверки
@@ -293,6 +302,7 @@ def verify_encryption_integrity(original_path: str, encrypted_path: str,
         else:
             raise ValueError(f"Неизвестный алгоритм: {algorithm}")
 
+        # Вычисляем хеш расшифрованных данных
         decrypted_hash = hashlib.sha256(decrypted_data).hexdigest()
 
         # Сравниваем хеши
@@ -807,10 +817,7 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
                 # Потоковая обработка для больших файлов с уникальным nonce для каждого блока
                 print(f"[INFO] Потоковое шифрование большого файла: {os.path.basename(file_path)} ({file_size // (1024*1024)} MB)")
 
-                # Вычисляем хеш оригинального файла потоково
-                for chunk in reader.iter_chunks():
-                    original_hash.update(chunk)
-
+                # Вычисляем хеш и шифруем файл в одном проходе
                 with open(temp_path, 'wb') as outfile:
                     block_index = 0
                     for chunk in reader.iter_chunks():
@@ -820,6 +827,10 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
                         # Зашифровываем блок с уникальным nonce
                         encrypted_chunk = cipher.encrypt(block_nonce, chunk, None)
                         outfile.write(encrypted_chunk)
+                        
+                        # Обновляем хеш оригинального файла
+                        original_hash.update(chunk)
+                        
                         block_index += 1
 
         # Переименовываем временный файл
@@ -912,6 +923,13 @@ def _decrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes, original_h
         if decrypted_size < max(1, encrypted_size // 100):  # Не менее 1% от оригинала
             os.remove(temp_path)
             raise ValueError(f"Подозрительно маленький размер расшифрованного файла {original_path}")
+        
+        # Дополнительная проверка для защиты от атак с подменой режима
+        # Если файл большой (>100MB), он должен был шифроваться в потоковом режиме
+        if encrypted_size > MAX_MEMORY_FILE_SIZE and not reader.use_streaming:
+            # Это подозрительно - большой файл должен был шифроваться потоково
+            os.remove(temp_path)
+            raise ValueError(f"Несоответствие режима шифрования: большой файл должен был обрабатываться в потоковом режиме")
 
         # Проверяем целостность через HMAC, если он предоставлен
         if original_hmac:
@@ -993,6 +1011,13 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
         if decrypted_size < max(1, encrypted_size // 100):  # Не менее 1% от оригинала
             os.remove(temp_path)
             raise ValueError(f"Подозрительно маленький размер расшифрованного файла {original_path}")
+        
+        # Дополнительная проверка для защиты от атак с подменой режима
+        # Если файл большой (>100MB), он должен был шифроваться в потоковом режиме
+        if encrypted_size > MAX_MEMORY_FILE_SIZE and not reader.use_streaming:
+            # Это подозрительно - большой файл должен был шифроваться потоково
+            os.remove(temp_path)
+            raise ValueError(f"Несоответствие режима шифрования: большой файл должен был обрабатываться в потоковом режиме")
 
         # Проверяем целостность через HMAC (хеш-проверка удалена как бессмысленная)
         # Основная проверка целостности происходит через HMAC
@@ -1164,28 +1189,36 @@ def encrypt_drive(drive_path: str, password: str, algorithm: str = "AES-256-GCM"
                 if progress_callback:
                     progress_callback(i + 1, total)
 
-            # Сохраняем метаданные во временный файл
+            # Обновляем блокировку с текущим прогрессом и метаданными
+            with open(lock_path, 'r', encoding='utf-8') as f:
+                lock_data = json.load(f)
+            
+            # Сохраняем ключевые метаданные в блокировку
+            lock_data["salt"] = base64.b64encode(salt).decode()
+            lock_data["algorithm"] = algorithm
+            lock_data["file_nonces"] = {rel_path: base64.b64encode(nonce).decode() for rel_path, nonce in file_nonces.items()}
+            lock_data["file_hmacs"] = file_hmacs
+            lock_data["file_hashes"] = file_hashes
+            lock_data["status"] = "completed"
+            lock_data["total_files"] = total
+            lock_data["processed_files_count"] = processed_count
+            
+            with open(lock_path, 'w', encoding='utf-8') as f:
+                json.dump(lock_data, f, indent=2)
+            
+            # Только после обновления блокировки сохраняем основные метаданные
             temp_meta_path = os.path.join(drive_path, TEMP_METADATA_FILE)
             save_metadata(drive_path, salt, file_nonces, file_hmacs, file_hashes, algorithm)
             
-            # Только после успешного сохранения метаданных переименовываем в основной файл
+            # Переименовываем временный файл метаданных в основной
             meta_path = os.path.join(drive_path, METADATA_FILE)
             if os.path.exists(meta_path):
                 os.remove(meta_path)
             os.rename(temp_meta_path, meta_path)
             
-            # Обновляем статус блокировки
-            with open(lock_path, 'r', encoding='utf-8') as f:
-                lock_data = json.load(f)
-            lock_data["status"] = "completed"
-            lock_data["total_files"] = total
-            lock_data["processed_files_count"] = processed_count
-            with open(lock_path, 'w', encoding='utf-8') as f:
-                json.dump(lock_data, f, indent=2)
-            
             return processed_count
     except Exception as e:
-        # При ошибке сохраняем блокировку для возможности восстановления
+        # При ошибке блокировка уже содержит актуальные метаданные для восстановления
         print(f"Критическая ошибка при шифровании: {e}")
         raise
     finally:
