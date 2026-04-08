@@ -5,6 +5,7 @@ import os
 import sys
 import json
 from resources import resource_path
+from utils import get_lang_manager, center_window
 
 def main():
     # Уничтожаем любое существующее окно перед созданием нового
@@ -14,12 +15,10 @@ def main():
     root = tk.Tk()
     
     # Устанавливаем заголовок окна с учетом локализации
-    from utils import get_lang_manager
     lang_manager = get_lang_manager()
     root.title(lang_manager.t("app_title"))
 
     # Центрируем окно ДО создания приложения
-    from utils import center_window
     center_window(root, 1000, 600)
 
     app = MainWindow(root)

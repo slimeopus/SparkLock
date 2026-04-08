@@ -27,6 +27,11 @@ except ImportError:
     HAS_PYNACL = False
 
 
+# === Константы алгоритмов шифрования ===
+ALGORITHM_AES_256_GCM = "AES-256-GCM"
+ALGORITHM_CHACHA20 = "ChaCha20"
+ALGORITHM_XCHACHA20_POLY1305 = "XChaCha20-Poly1305"
+
 # === Улучшенное управление памятью ===
 
 class SecureBytes:
@@ -42,10 +47,7 @@ class SecureBytes:
         Args:
             data: Начальные данные (bytes, bytearray) или размер буфера (int)
         """
-        if isinstance(data, int):
-            self._buffer = bytearray(data)
-        else:
-            self._buffer = bytearray(data)
+        self._buffer = bytearray(data)
         self._finalized = False
         # Регистрируем слабый финализатор для очистки при сборке мусора
         self._weak_ref = weakref.ref(self, self._cleanup_callback)
@@ -85,11 +87,9 @@ class SecureBytes:
         self._buffer[:] = secrets.token_bytes(len(self._buffer))
         
         # Дополнительные проходы: нули и единицы
+        padd = [b'\x00', b'\xFF']
         for i in range(passes - 1):
-            if i % 2 == 0:
-                self._buffer[:] = b'\x00' * len(self._buffer)
-            else:
-                self._buffer[:] = b'\xFF' * len(self._buffer)
+            self._buffer[:] = padd[i % 2] * len(self._buffer)
         
         # Финальный проход: нули
         self._buffer[:] = b'\x00' * len(self._buffer)
@@ -290,12 +290,12 @@ def verify_encryption_integrity(original_path: str, encrypted_path: str,
         encrypted_data = Path(encrypted_path).read_bytes()
 
         # Пробуем расшифровать для проверки
-        if algorithm == "AES-256-GCM":
+        if algorithm == ALGORITHM_AES_256_GCM:
             cipher = AESGCM(key)
             # Для малых файлов nonce = base_nonce (8 байт), cipher дополнит до 12 байт
             full_nonce = base_nonce if len(base_nonce) == 12 else base_nonce + b'\x00\x00\x00\x00'
             decrypted_data = cipher.decrypt(full_nonce, encrypted_data, None)
-        elif algorithm == "ChaCha20":
+        elif algorithm == ALGORITHM_CHACHA20:
             cipher = ChaCha20Poly1305(key)
             full_nonce = base_nonce if len(base_nonce) == 12 else base_nonce + b'\x00\x00\x00\x00'
             decrypted_data = cipher.decrypt(full_nonce, encrypted_data, None)
@@ -696,7 +696,6 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
                         raise ValueError("Ошибка целостности: хеш расшифрованных данных не совпадает")
                     
                     # Сравниваем HMAC
-                    import tempfile
                     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                         temp_file.write(decrypted_data)
                         temp_path_hmac = temp_file.name
@@ -773,13 +772,13 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
     original_hmac = calculate_hmac(file_path, key)
 
     # Определяем алгоритм шифрования
-    if algorithm == "AES-256-GCM":
+    if algorithm == ALGORITHM_AES_256_GCM:
         # Генерируем базовый nonce (8 байт для префикса, 4 байта резервируем под счётчик)
         base_nonce = os.urandom(8)
-    elif algorithm == "ChaCha20":
+    elif algorithm == ALGORITHM_CHACHA20:
         # Генерируем базовый nonce (8 байт для префикса, 4 байта резервируем под счётчик)
         base_nonce = os.urandom(8)
-    elif algorithm == "XChaCha20-Poly1305":
+    elif algorithm == ALGORITHM_XCHACHA20_POLY1305:
         if not HAS_PYNACL:
             raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
         # XChaCha20 использует 24-байтовый nonce
@@ -796,7 +795,7 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
 
     try:
         # Выбираем cipher в зависимости от алгоритма
-        if algorithm == "AES-256-GCM":
+        if algorithm == ALGORITHM_AES_256_GCM:
             cipher = AESGCM(key)
         else:  # ChaCha20
             cipher = ChaCha20Poly1305(key)
@@ -839,7 +838,7 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
         os.rename(temp_path, encrypted_path)
 
         # Проверяем целостность (для XChaCha20-Poly1305 эта проверка не поддерживается в текущей реализации)
-        if algorithm in ["AES-256-GCM", "ChaCha20"]:
+        if algorithm in [ALGORITHM_AES_256_GCM, ALGORITHM_CHACHA20]:
             if not verify_encryption_integrity(file_path, encrypted_path, algorithm, key, base_nonce, original_hmac):
                 os.remove(encrypted_path)
                 raise ValueError(f"Ошибка целостности при шифровании файла {file_path}. Исходный файл сохранен.")
@@ -961,13 +960,13 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
     temp_path = original_path + ".tmp"
 
     # Определяем алгоритм расшифровки
-    if algorithm == "AES-256-GCM":
+    if algorithm == ALGORITHM_AES_256_GCM:
         cipher = AESGCM(key)
         base_nonce = nonce  # 8 байт
-    elif algorithm == "ChaCha20":
+    elif algorithm == ALGORITHM_CHACHA20:
         cipher = ChaCha20Poly1305(key)
         base_nonce = nonce  # 8 байт
-    elif algorithm == "XChaCha20-Poly1305":
+    elif algorithm == ALGORITHM_XCHACHA20_POLY1305:
         if not HAS_PYNACL:
             raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
         # XChaCha20 использует 24-байтовый nonce
