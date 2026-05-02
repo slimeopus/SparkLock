@@ -27,11 +27,6 @@ except ImportError:
     HAS_PYNACL = False
 
 
-# === Константы алгоритмов шифрования ===
-ALGORITHM_AES_256_GCM = "AES-256-GCM"
-ALGORITHM_CHACHA20 = "ChaCha20"
-ALGORITHM_XCHACHA20_POLY1305 = "XChaCha20-Poly1305"
-
 # === Улучшенное управление памятью ===
 
 class SecureBytes:
@@ -47,7 +42,10 @@ class SecureBytes:
         Args:
             data: Начальные данные (bytes, bytearray) или размер буфера (int)
         """
-        self._buffer = bytearray(data)
+        if isinstance(data, int):
+            self._buffer = bytearray(data)
+        else:
+            self._buffer = bytearray(data)
         self._finalized = False
         # Регистрируем слабый финализатор для очистки при сборке мусора
         self._weak_ref = weakref.ref(self, self._cleanup_callback)
@@ -87,9 +85,11 @@ class SecureBytes:
         self._buffer[:] = secrets.token_bytes(len(self._buffer))
         
         # Дополнительные проходы: нули и единицы
-        padd = [b'\x00', b'\xFF']
         for i in range(passes - 1):
-            self._buffer[:] = padd[i % 2] * len(self._buffer)
+            if i % 2 == 0:
+                self._buffer[:] = b'\x00' * len(self._buffer)
+            else:
+                self._buffer[:] = b'\xFF' * len(self._buffer)
         
         # Финальный проход: нули
         self._buffer[:] = b'\x00' * len(self._buffer)
@@ -290,12 +290,12 @@ def verify_encryption_integrity(original_path: str, encrypted_path: str,
         encrypted_data = Path(encrypted_path).read_bytes()
 
         # Пробуем расшифровать для проверки
-        if algorithm == ALGORITHM_AES_256_GCM:
+        if algorithm == "AES-256-GCM":
             cipher = AESGCM(key)
             # Для малых файлов nonce = base_nonce (8 байт), cipher дополнит до 12 байт
             full_nonce = base_nonce if len(base_nonce) == 12 else base_nonce + b'\x00\x00\x00\x00'
             decrypted_data = cipher.decrypt(full_nonce, encrypted_data, None)
-        elif algorithm == ALGORITHM_CHACHA20:
+        elif algorithm == "ChaCha20":
             cipher = ChaCha20Poly1305(key)
             full_nonce = base_nonce if len(base_nonce) == 12 else base_nonce + b'\x00\x00\x00\x00'
             decrypted_data = cipher.decrypt(full_nonce, encrypted_data, None)
@@ -470,6 +470,120 @@ def validate_password_strength(password: str) -> bool:
     return True, "Пароль соответствует требованиям безопасности"
 
 METADATA_FILE = ".usb_crypt_meta.json"
+
+# Конфигурация Anti-Forensic Disk Wiper
+MAX_FAILED_ATTEMPTS = 3  # Максимальное количество неудачных попыток перед активацией защиты
+WIPE_PASSES = 5  # Количество проходов перезаписи для очистки
+
+# Глобальный счетчик неудачных попыток (может быть сохранен в файл или в памяти)
+failed_attempts = 0
+
+
+def secure_wipe_file(file_path: str, passes: int = WIPE_PASSES) -> bool:
+    """
+    Безопасно перезаписывает файл случайными данными и удаляет его.
+    
+    Args:
+        file_path: Путь к файлу для очистки
+        passes: Количество проходов перезаписи
+        
+    Returns:
+        True при успешной очистке, False в случае ошибки
+    """
+    if not os.path.exists(file_path):
+        return True  # Файл уже отсутствует
+    
+    try:
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            os.remove(file_path)
+            return True
+        
+        # Перезаписываем файл несколькими проходами
+        for pass_num in range(passes):
+            with open(file_path, 'r+b') as f:
+                if pass_num == 0:
+                    # Первый проход: случайные данные
+                    f.write(secrets.token_bytes(file_size))
+                elif pass_num % 2 == 1:
+                    # Нечетные проходы: нули
+                    f.seek(0)
+                    f.write(b'\x00' * file_size)
+                else:
+                    # Четные проходы: единицы
+                    f.seek(0)
+                    f.write(b'\xFF' * file_size)
+                f.flush()
+                os.fsync(f.fileno())
+        
+        # Финальная перезапись нулями
+        with open(file_path, 'r+b') as f:
+            f.seek(0)
+            f.write(b'\x00' * file_size)
+            f.flush()
+            os.fsync(f.fileno())
+        
+        # Удаление файла
+        os.remove(file_path)
+        return True
+    except Exception as e:
+        print(f"Ошибка при очистке файла {file_path}: {e}")
+        return False
+
+
+def activate_anti_forensic_wipe(drive_path: str) -> bool:
+    """
+    Активирует защиту Anti-Forensic Disk Wiper, очищая файл метаданных.
+    
+    Args:
+        drive_path: Путь к диску, на котором нужно активировать защиту
+        
+    Returns:
+        True при успешной активации защиты, False в случае ошибки
+    """
+    meta_path = os.path.join(drive_path, METADATA_FILE)
+    if not os.path.exists(meta_path):
+        print(f"Файл метаданных не найден: {meta_path}")
+        return True  # Уже очищен
+    
+    print(f"Активация защиты Anti-Forensic Disk Wiper: {meta_path}")
+    print(f"Перезапись файла метаданных случайными данными ({WIPE_PASSES} проходов)...")
+    
+    success = secure_wipe_file(meta_path, WIPE_PASSES)
+    if success:
+        print("Защита Anti-Forensic Disk Wiper успешно активирована. Метаданные удалены.")
+    else:
+        print("Ошибка при активации защиты Anti-Forensic Disk Wiper")
+    
+    return success
+
+
+def increment_failed_attempts(drive_path: str) -> int:
+    """
+    Увеличивает счетчик неудачных попыток и активирует защиту при превышении лимита.
+    
+    Args:
+        drive_path: Путь к диску для отслеживания попыток
+        
+    Returns:
+        Текущее количество неудачных попыток
+    """
+    global failed_attempts
+    failed_attempts += 1
+    print(f"Неудачная попытка ввода пароля: {failed_attempts}/{MAX_FAILED_ATTEMPTS}")
+    
+    if failed_attempts >= MAX_FAILED_ATTEMPTS:
+        print(f"Превышен лимит неудачных попыток ({MAX_FAILED_ATTEMPTS}). Активация защиты...")
+        activate_anti_forensic_wiper(drive_path)
+    
+    return failed_attempts
+
+
+def reset_failed_attempts() -> None:
+    """Сбрасывает счетчик неудачных попыток (вызывается при успешном вводе пароля)"""
+    global failed_attempts
+    failed_attempts = 0
+
 
 def derive_key(password: str, salt: bytes, key_size: int = 32) -> bytes:
     """Устаревшая функция. Используйте secure_key контекстный менеджер вместо этого."""
@@ -696,6 +810,7 @@ def _encrypt_with_xchacha20(file_path: str, key: bytes, nonce: bytes) -> tuple[b
                         raise ValueError("Ошибка целостности: хеш расшифрованных данных не совпадает")
                     
                     # Сравниваем HMAC
+                    import tempfile
                     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                         temp_file.write(decrypted_data)
                         temp_path_hmac = temp_file.name
@@ -772,13 +887,13 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
     original_hmac = calculate_hmac(file_path, key)
 
     # Определяем алгоритм шифрования
-    if algorithm == ALGORITHM_AES_256_GCM:
+    if algorithm == "AES-256-GCM":
         # Генерируем базовый nonce (8 байт для префикса, 4 байта резервируем под счётчик)
         base_nonce = os.urandom(8)
-    elif algorithm == ALGORITHM_CHACHA20:
+    elif algorithm == "ChaCha20":
         # Генерируем базовый nonce (8 байт для префикса, 4 байта резервируем под счётчик)
         base_nonce = os.urandom(8)
-    elif algorithm == ALGORITHM_XCHACHA20_POLY1305:
+    elif algorithm == "XChaCha20-Poly1305":
         if not HAS_PYNACL:
             raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
         # XChaCha20 использует 24-байтовый nonce
@@ -795,7 +910,7 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
 
     try:
         # Выбираем cipher в зависимости от алгоритма
-        if algorithm == ALGORITHM_AES_256_GCM:
+        if algorithm == "AES-256-GCM":
             cipher = AESGCM(key)
         else:  # ChaCha20
             cipher = ChaCha20Poly1305(key)
@@ -838,7 +953,7 @@ def encrypt_file(file_path: str, algorithm: str, key: bytes) -> Tuple[bytes, str
         os.rename(temp_path, encrypted_path)
 
         # Проверяем целостность (для XChaCha20-Poly1305 эта проверка не поддерживается в текущей реализации)
-        if algorithm in [ALGORITHM_AES_256_GCM, ALGORITHM_CHACHA20]:
+        if algorithm in ["AES-256-GCM", "ChaCha20"]:
             if not verify_encryption_integrity(file_path, encrypted_path, algorithm, key, base_nonce, original_hmac):
                 os.remove(encrypted_path)
                 raise ValueError(f"Ошибка целостности при шифровании файла {file_path}. Исходный файл сохранен.")
@@ -960,13 +1075,13 @@ def decrypt_file(file_path: str, algorithm: str, key: bytes, nonce: bytes, origi
     temp_path = original_path + ".tmp"
 
     # Определяем алгоритм расшифровки
-    if algorithm == ALGORITHM_AES_256_GCM:
+    if algorithm == "AES-256-GCM":
         cipher = AESGCM(key)
         base_nonce = nonce  # 8 байт
-    elif algorithm == ALGORITHM_CHACHA20:
+    elif algorithm == "ChaCha20":
         cipher = ChaCha20Poly1305(key)
         base_nonce = nonce  # 8 байт
-    elif algorithm == ALGORITHM_XCHACHA20_POLY1305:
+    elif algorithm == "XChaCha20-Poly1305":
         if not HAS_PYNACL:
             raise ValueError("Для использования XChaCha20-Poly1305 требуется установить библиотеку pynacl")
         # XChaCha20 использует 24-байтовый nonce
@@ -1242,7 +1357,16 @@ def decrypt_drive(drive_path: str, password: str, progress_callback=None):
     if not is_strong:
         print("Предупреждение: Используется слабый пароль. Рекомендуется изменить пароль после расшифровки.")
     
-    salt, file_nonces, file_hmacs, file_hashes, algorithm = load_metadata(drive_path)
+    # Загружаем метаданные с проверкой на наличие
+    try:
+        salt, file_nonces, file_hmacs, file_hashes, algorithm = load_metadata(drive_path)
+    except Exception as e:
+        # Увеличиваем счетчик неудачных попыток и проверяем необходимость активации защиты
+        increment_failed_attempts(drive_path)
+        raise ValueError(f"Не удалось загрузить метаданные: {e}")
+    
+    # Сбрасываем счетчик неудачных попыток при успешной загрузке метаданных
+    reset_failed_attempts()
 
     # Создаем файл блокировки
     lock_path = create_lock(drive_path, "decrypt")
